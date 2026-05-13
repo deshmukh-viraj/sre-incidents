@@ -1,0 +1,154 @@
+-----------------------------------------------------------------------------------
+MULTI-AGENT INCIDENT RESPONSE ORCHESTRATOR (FINTECH SRE)
+End-to-End Agentic AI Project Flow
+-----------------------------------------------------------------------------------
+
+-------------------------Phase 1: Setup & Repository Structure---------------------------
+
+1. Create repo, clone it in local
+2. Create a virtual environment named 'sre_agent' - conda create -n sre_agent python=3.11
+3. Activate the virtual environment - conda activate sre_agent
+4. pip install cookiecutter
+5. cookiecutter -c v1 https://github.com/drivendata/cookiecutter-data-science
+6. Rename src.models -> src.graph (We are building state graphs, not traditional ML models)
+7. Create directories inside src/: topology/, simulation/, tools/, api/, evaluation/
+8. git add - commit - push
+
+-------------------------Phase 2: Agentic Experiment Tracking (MLflow)---------------------------
+9. Go to: https://dagshub.com/dashboard
+10. Create > New Repo > Connect a repo > (Github) Connect > Select your repo > Connect
+11. Copy experiment tracking url and code snippet.
+12. pip install dagshub mlflow langchain langgraph langsmith openai
+13. Run the experiment notebooks:
+    - Test basic LLM call (GPT-4o).
+    - Test LangChain Tool Binding (bind_tools([query_logs, restart_service])).
+    - Log the System Prompt Templates (Triage, Diagnosis) and Tool Schemas to MLflow as artifacts/parameters.
+14. git add - commit - push
+
+-------------------------Phase 3: The SRE "Data" World (DVC & Simulation)---------------------------
+15. dvc init
+16. create a local folder as "local_s3" (temporary work)
+17. on terminal - "dvc remote add -d mylocal local_s3"
+
+18. Build the Fintech SRE Simulation Environment:
+    - src/topology/topology.yaml: Define Fintech microservices (Mobile_App -> API_Gateway -> Trade_Execution_Engine -> Ledger_DB).
+    - src/topology/runbooks/: 10-15 Markdown files (Hybrid: curated from Kaggle/public SOPs + custom Fintech runbooks like runbook_ledger_db_outage.md).
+    - src/simulation/scenarios.yaml: 20 distinct test cases (5 Rule-based, 5 Agentic+Safe, 5 Agentic+Destructive/HITL, 5 Edge Cases). This is the "Answer Key".
+    - src/simulation/generator.py: Python script to dynamically generate Fintech mock metrics (HikariCP connections, p99 latency) and logs (SQLException, OOM errors) based on scenarios.yaml.
+19. Add code to below files/folders inside src dir:
+    - src/graph/state.py: Define IncidentState(TypedDict) - the shared memory (alert, logs_data, diagnosis, proposed_action, iteration_count).
+    - src/tools/sre_tools.py: Python functions (check_metrics, query_logs, clear_cache, restart_service, rollback_deployment) decorated with @tool. Categorize safe vs destructive.
+    - src/graph/nodes.py: Agent node functions (triage_node, diagnosis_node, remediation_node).
+    - src/graph/routing.py: Conditional edge logic (semantic_router, hitl_safety_gate, circuit_breaker).
+    - src/graph/orchestrator.py: Compile the LangGraph StateGraph with SqliteSaver/PostgresSaver checkpointer.
+20. add file - dvc.yaml (Track the generation of simulation data and runbooks)
+21. add file - params.yaml (Define LLM model names, temperature=0.0, max_iterations=3, safe_tools, destructive_tools)
+22. DVC pipeline is ready to run - dvc repro (This executes generator.py to create the mock telemetry)
+23. Once do - dvc status
+24. git add - commit - push
+
+25. Need to add S3 as remote storage - Create IAM User(keep cred) and S3 bucket
+26. pip install - dvc[s3] & awscli
+27. Set aws cred - aws configure
+28. Add s3 as dvc remote storage - dvc remote add -d myremote s3://<bucket-name>
+29. dvc push (Push versioned runbooks and scenarios to S3)
+
+-------------------------Phase 4: The Agentic Core (LangGraph Implementation)---------------------------
+30. Implement src/graph/state.py: Define the schema of data passing between agents.
+31. Implement src/tools/sre_tools.py: Write the Fintech-specific mock tool logic (query_logs returns Fintech exceptions).
+32. Implement src/graph/nodes.py:
+    - Triage Node: Enriches alert, uses Semantic Router (if known issue -> auto-remediate, else -> Diagnosis).
+    - Diagnosis Node: Uses RAG over runbooks + tools to find root cause. Outputs Pydantic schema.
+    - Remediation Node: Proposes execution plan based on diagnosis.
+33. Implement src/graph/routing.py:
+    - Route after Diagnosis: If proposed action is in destructive_tools -> route to HITL Gate. Else -> route to Execute.
+    - Circuit Breaker: If iteration_count >= 3 -> route to Escalate_Human.
+34. Implement src/graph/orchestrator.py:
+    - Wire nodes and conditional edges together.
+    - Add checkpointer (SqliteSaver for local, PostgresSaver for prod) to allow graph pausing/resuming.
+    - Use `interrupt_before` on the HITL node.
+
+-------------------------Phase 5: Evaluation Pipeline---------------------------
+35. Implement evaluation/agent_eval.py:
+    - Script that reads scenarios.yaml.
+    - Programmatically invokes the LangGraph app for each scenario.
+    - Deterministic Checks: Did it request HITL for destructive scenarios? Did it resolve in < 3 steps?
+    - Log results (MTTR, Accuracy, Token Cost) to MLflow against the specific prompt version.
+
+-------------------------Phase 6: API Development (FastAPI + HITL Resumption)---------------------------
+36. Create new dir - api_app | Inside that, add rest of the files and dir
+37. pip install fastapi uvicorn psycopg2-binary (psycopg2 for Postgres checkpointer in prod)
+38. Build api_app/main.py:
+    - POST /webhook/alert: Receives Prometheus alert, creates config={"configurable": {"thread_id": incident_id}}, invokes graph.
+    - POST /approve_action: Receives human approval from Slack, updates IncidentState, resumes graph using checkpointer.
+    - POST /reject_action: Receives human rejection, routes graph back to diagnosis node.
+    - GET /metrics: Exposes Prometheus metrics for observability.
+39. pip freeze > requirements.txt
+40. Add .github/workflows/ci.yaml file (Lint, run agent_eval.py as CI test)
+41. Create key token on Dagshub for auth -> Add to github secrets.
+42. Add dir "tests" & "scripts". This will contain unit tests for tool schemas and graph routing logic.
+
+>>>>> Phase 7: Moving to Docker <<<<<
+43. pip install pipreqs
+44. cd api_app & do "pipreqs . --force"
+45. Add dockerfile and start docker-desktop in background
+46. go to root dir and: "docker build -t sre-agent-app:latest ."
+47. Try running the image locally: "docker run -p 8000:8000 sre-agent-app:latest"
+48. Setup aws services for below secrets and variables:
+    AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, ECR_REPOSITORY (sre-agent-proj), AWS_ACCOUNT_ID
+49. Execute CICD pipeline till the stage where we build and push image to ECR.
+
+----------------------------------------------------------------------------------
+*********Setup required before moving to EKS deployment*********
+----------------------------------------------------------------------------------
+* Ensure AWS CLI v2 is installed and in system PATH (C:\Program Files\Amazon\AWSCLIV2\).
+* Install kubectl (v1.28.2) and move to C:\Windows\System32.
+* Install eksctl (v0.158.0) and move to C:\Windows\System32.
+----------------------------------------------------------------------------------
+
+50. Create an EKS cluster:
+    eksctl create cluster --name sre-agent-cluster --region us-east-1 --nodegroup-name sre-nodes --node-type t3.medium --nodes 2 --nodes-min 2 --nodes-max 3 --managed
+51. Update kubectl Config:
+    aws eks --region us-east-1 update-kubeconfig --name sre-agent-cluster
+52. Verify cluster:
+    kubectl get nodes
+
+53. Deploy the app on EKS via CICD pipeline:
+    >> Edit ci.yaml, deployment.yaml, dockerfile.
+    >> IMPORTANT: Deploy a PostgresDB StatefulSet or use AWS RDS for LangGraph Checkpointing persistence in production.
+    >> Edit the security group for nodes and edit inbound rule for 8000 port.
+54. Once the LoadBalancer service is up, get the external IP:
+    kubectl get svc sre-agent-service
+55. Test the webhook trigger:
+    curl -X POST http://<external-ip>:8000/webhook/alert -H "Content-Type: application/json" -d '{"alert_name": "HighLatency", "service": "Trade_Execution_Engine"}'
+
+
+>>>>>>>>>> Phase 8: Prometheus Server Setup (Agent Observability) <<<<<<<<<<
+56. Launch an Ubuntu EC2 Instance for Prometheus (t3.medium, 20GB, Ports 9090, 22).
+57. Download and install Prometheus (v2.46.0).
+58. Edit /etc/prometheus/prometheus.yml to scrape the FastAPI /metrics endpoint:
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: "sre-agent"
+        static_configs:
+          - targets: ["<eks-external-ip>:8000"]
+59. Run Prometheus: /usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml
+
+>>>>>>>>>> Phase 9: Grafana Server Setup (Agentic Dashboards) <<<<<<<<<<
+60. Launch an Ubuntu EC2 Instance for Grafana (t3.medium, 20GB, Ports 3000, 22).
+61. Install Grafana (v10.1.5) and start the service.
+62. Open Grafana web UI: http://<ec2-public-ip>:3000
+63. Add Prometheus as a Data Source.
+64. Build Agentic AI Dashboards in Grafana:
+    - API Operations: Request rate, Latency, Error rate.
+    - Agent Economics: LLM Token Cost per Incident, Semantic Router Bypass Rate (Rules vs LLM).
+    - Agent Performance: MTTR (Mean Time To Resolve), HITL Approval/Rejection Rate, Iteration loops per incident.
+
+----------------------------------------------------------------------------------
+AWS Resource Cleanup:
+65. Delete deployment - kubectl delete deployment sre-agent-app
+66. Delete service - kubectl delete service sre-agent-service
+67. Delete EKS Cluster - eksctl delete cluster --name sre-agent-cluster --region us-east-1
+68. Delete artifacts of ECR and S3.
+69. Terminate Prometheus and Grafana EC2 instances.
