@@ -1,0 +1,66 @@
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+# Distributor receives traces from OTel Collector
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+# Ingester batches spans before flushing to storage
+ingester:
+  max_block_duration: 5m
+
+# Compactor merges blocks for query efficiency
+compactor:
+  compaction_window: 1h
+  max_block_bytes: 100_000_000     # 100 MB max block size
+  block_retention: 720h            # 30 days retention
+
+# Storage backend that local filesystem for MVP, swap to S3 for Phase 3
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tmp/tempo/blocks
+    wal:
+      path: /tmp/tempo/wal
+
+# Querier that enables TraceQL search
+querier:
+  max_concurrent_queries: 10
+
+# Query frontend
+query_frontend:
+  max_retries: 2
+  search:
+    duration_slo: 5s
+    throughput_bytes_slo: 1.073741824e+09   # 1GB
+  trace_by_id:
+    duration_slo: 5s
+
+# Metrics generator  that derives RED metrics (rate, error, duration) from traces
+# These appear in Prometheus as trace-derived metrics (service graphs)
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: fintech-sim
+  storage:
+    path: /tmp/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]
+      generate_native_histograms: both

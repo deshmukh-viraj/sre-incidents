@@ -1,0 +1,113 @@
+# OpenTelemetry Collector configuration
+# Receives: OTLP traces/metrics from the generator
+# Exports:  traces -> Tempo | metrics -> Prometheus
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+receivers:
+  # OTLP receiver — accepts traces and metrics from instrumented services
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Scrape the collector's own internal metrics
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['0.0.0.0:8888']
+
+processors:
+  # Batch traces before exporting — reduces network overhead
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+    send_batch_max_size: 2048
+
+  # Memory limiter — prevents OOM during traffic bursts
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Add resource attributes to every span (environment context)
+  resource:
+    attributes:
+      - key: environment
+        value: production-sim
+        action: upsert
+      - key: cluster
+        value: fintech-sim-local
+        action: upsert
+
+  # Tail-based sampling — keep 100% of error traces, 1% of success traces
+  # This is the right production pattern: errors are always captured
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 50000
+    expected_new_traces_per_sec: 50
+    policies:
+      - name: keep-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: keep-slow-traces
+        type: latency
+        latency:
+          threshold_ms: 500
+      - name: keep-scenario-traces
+        type: string_attribute
+        string_attribute:
+          key: sim.scenario
+          values: ["*"]
+          enabled_regex_matching: true
+      - name: probabilistic-sample-rest
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 1    # 1% of normal traffic
+
+exporters:
+  # Export traces to Tempo
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Export collector's own metrics to Prometheus exposition format
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: otelcol
+    send_timestamps: true
+    metric_expiration: 180m
+    enable_open_metrics: true
+
+  # Debug exporter  prints sampled spans to logs (disable in production)
+  debug:
+    verbosity: basic
+    sampling_initial: 2
+    sampling_thereafter: 500
+
+service:
+  extensions: [health_check, pprof]
+
+  pipelines:
+    # Trace pipeline: receive -> limit -> batch -> sample -> export to Tempo
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch, tail_sampling]
+      exporters: [otlp/tempo, debug]
+
+    # Metrics pipeline: scrape collector metrics -> export to Prometheus
+    metrics:
+      receivers: [prometheus]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
