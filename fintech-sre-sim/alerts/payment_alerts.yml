@@ -1,0 +1,289 @@
+groups:
+  # Payment Gateway SLO Alerts
+
+  - name: payment_gateway_slo
+    interval: 30s
+    rules:
+      - alert: PaymentGatewayP99LatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{service="payment_gateway"}[5m]))
+            by (le)
+          ) > 1.5
+        for: 3m
+        labels:
+          severity: warning
+          team: payments
+          runbook: RB-001
+          regulation: PCI-DSS
+        annotations:
+          summary: "Payment gateway p99 latency above 1.5s"
+          description: |
+            p99 latency is {{ $value | humanizeDuration }} (threshold: 1.5s).
+            This may indicate card rails throttling or downstream degradation.
+          dashboard: "http://grafana:3000/d/payments-overview"
+          runbook_url: "https://runbooks.internal/RB-001"
+
+      - alert: PaymentGatewayP99LatencyCritical
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{service="payment_gateway"}[5m]))
+            by (le)
+          ) > 3.0
+        for: 2m
+        labels:
+          severity: critical
+          team: payments
+          runbook: RB-001
+          slo: latency_p99
+        annotations:
+          summary: "CRITICAL: Payment gateway p99 latency above 3s — SLO breach"
+          description: |
+            p99 latency is {{ $value | humanizeDuration }}.
+            SLO breach in progress. Escalate immediately.
+
+      - alert: PaymentGatewayErrorRateHigh
+        expr: |
+          sum(rate(http_requests_total{service="payment_gateway", status_code=~"5.."}[5m]))
+          / sum(rate(http_requests_total{service="payment_gateway"}[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: payments
+          runbook: RB-001
+        annotations:
+          summary: "Payment gateway error rate above 5%"
+          description: "Error rate: {{ $value | humanizePercentage }}"
+
+      - alert: SLOErrorBudgetBurnRateFast
+        expr: |
+          (
+            sum(rate(http_requests_total{service="payment_gateway", status_code=~"5.."}[1h]))
+            / sum(rate(http_requests_total{service="payment_gateway"}[1h]))
+          ) > (14.4 * 0.001)
+        for: 5m
+        labels:
+          severity: critical
+          team: payments
+          runbook: RB-001
+        annotations:
+          summary: "SLO error budget burning at 14.4× — will exhaust in 1 hour"
+          description: |
+            Multiwindow error budget burn rate alert.
+            At this rate, the monthly error budget will be exhausted in ~1h.
+
+ 
+  # Circuit Breaker Alerts
+  - name: circuit_breakers
+    interval: 15s
+    rules:
+      - alert: CircuitBreakerOpen
+        expr: circuit_breaker_state > 1
+        for: 1m
+        labels:
+          severity: critical
+          team: payments
+          runbook: RB-002
+        annotations:
+          summary: "Circuit breaker OPEN: {{ $labels.service }} → {{ $labels.upstream }}"
+          description: |
+            Circuit breaker between {{ $labels.service }} and {{ $labels.upstream }} is OPEN.
+            Most requests are fast-failing. Check upstream health.
+
+      - alert: PaymentTransactionFailureRateHigh
+        expr: |
+          sum(rate(payment_transactions_total{status="failed"}[5m]))
+          / sum(rate(payment_transactions_total[5m])) > 0.10
+        for: 2m
+        labels:
+          severity: critical
+          team: payments
+          runbook: RB-002
+        annotations:
+          summary: "Payment transaction failure rate above 10%"
+          description: "Failure rate: {{ $value | humanizePercentage }}"
+
+  
+  # Database Alerts
+  - name: database
+    interval: 30s
+    rules:
+      - alert: DBConnectionPoolNearExhaustion
+        expr: |
+          db_connection_pool_active / db_connection_pool_max > 0.85
+        for: 3m
+        labels:
+          severity: warning
+          team: platform
+          runbook: RB-004
+        annotations:
+          summary: "DB {{ $labels.db }} connection pool at {{ $value | humanizePercentage }}"
+          description: |
+            Pool utilisation above 85% for 3 minutes.
+            Approaching exhaustion — latency degradation expected.
+
+      - alert: DBConnectionPoolExhausted
+        expr: |
+          db_connection_pool_active / db_connection_pool_max > 0.98
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+          runbook: RB-004
+        annotations:
+          summary: "CRITICAL: DB {{ $labels.db }} connection pool exhausted"
+          description: |
+            Pool is {{ $value | humanizePercentage }} full.
+            New connections will be rejected. Immediate action required.
+
+      - alert: SlowQueryDetected
+        expr: |
+          histogram_quantile(0.95,
+            rate(db_query_duration_seconds_bucket[5m])
+          ) > 1.0
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+          runbook: RB-004
+        annotations:
+          summary: "Slow queries on {{ $labels.db }}: p95 > 1s"
+          description: "p95 query duration: {{ $value | humanizeDuration }}"
+
+      - alert: LedgerTransactionLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{service="account_ledger"}[5m]))
+            by (le)
+          ) > 2.0
+        for: 3m
+        labels:
+          severity: critical
+          team: payments
+          runbook: RB-004
+        annotations:
+          summary: "Account ledger p99 > 2s — likely DB pressure"
+
+ 
+  # Security / Data Exfiltration Alerts
+
+  - name: security
+    interval: 15s
+    rules:
+      - alert: AnomalousAPIRequestRate
+        expr: |
+          sum(rate(http_requests_total{service="api_gateway"}[5m]))
+          > 10 * avg_over_time(
+              sum(rate(http_requests_total{service="api_gateway"}[5m]))[1h:5m]
+            )
+        for: 2m
+        labels:
+          severity: critical
+          team: security
+          runbook: RB-003
+          regulation: PCI-DSS
+        annotations:
+          summary: "API gateway request rate 10× above hourly average"
+          description: |
+            Possible credential stuffing or automated scraping.
+            Current rate: {{ $value }} rps
+
+      - alert: AuthenticationFailureRateSpiking
+        expr: |
+          sum(rate(http_requests_total{service="api_gateway", status_code="401"}[5m]))
+          > 5
+        for: 3m
+        labels:
+          severity: warning
+          team: security
+          runbook: RB-003
+        annotations:
+          summary: "Authentication failures above 5/s for 3 minutes"
+          description: "Rate: {{ $value }}/s — check for credential stuffing"
+
+      - alert: ComplianceAuditTriggered
+        expr: |
+          increase(compliance_events_total{event_type="data_access_audit"}[5m]) > 100
+        for: 0m
+        labels:
+          severity: info
+          team: compliance
+          runbook: RB-005
+          regulation: PCI-DSS
+        annotations:
+          summary: "Compliance audit event volume spike — audit may be in progress"
+
+ 
+  # Fraud Model Alerts
+  
+  - name: fraud_model
+    interval: 60s
+    rules:
+      - alert: PaymentDeclineRateAbnormal
+        expr: |
+          sum(rate(payment_transactions_total{status="declined"}[10m]))
+          / sum(rate(payment_transactions_total[10m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          team: fraud
+          runbook: RB-006
+        annotations:
+          summary: "Payment decline rate above 5% — possible fraud model degradation"
+          description: |
+            Decline rate: {{ $value | humanizePercentage }} (baseline: ~0.8%).
+            Check fraud model precision and feature pipeline health.
+
+      - alert: FraudModelLatencySpiking
+        expr: |
+          histogram_quantile(0.99,
+            rate(fraud_model_prediction_latency_seconds_bucket[5m])
+          ) > 0.2
+        for: 3m
+        labels:
+          severity: warning
+          team: fraud
+          runbook: RB-006
+        annotations:
+          summary: "Fraud model p99 inference latency > 200ms"
+          description: "p99: {{ $value | humanizeDuration }} — model serving may be degraded"
+
+
+  # Infrastructure / SLO Budget
+ 
+  - name: infrastructure
+    interval: 60s
+    rules:
+      - alert: ServiceMemoryPressure
+        expr: |
+          process_memory_rss_bytes{service="account_ledger"} > 800e6
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          runbook: RB-004
+        annotations:
+          summary: "{{ $labels.service }} memory above 800MB"
+          description: "RSS: {{ $value | humanize1024 }}B — possible memory leak"
+
+      - alert: SLOErrorBudgetLow
+        expr: slo_error_budget_remaining_ratio < 0.20
+        for: 0m
+        labels:
+          severity: warning
+          team: payments
+        annotations:
+          summary: "{{ $labels.service }} {{ $labels.slo_name }} SLO budget < 20% remaining"
+          description: |
+            {{ $value | humanizePercentage }} of error budget remaining.
+            Consider freeze on non-critical deployments.
+
+      - alert: SLOErrorBudgetExhausted
+        expr: slo_error_budget_remaining_ratio < 0.01
+        for: 0m
+        labels:
+          severity: critical
+          team: payments
+        annotations:
+          summary: "{{ $labels.service }} SLO error budget EXHAUSTED"
+          description: "Immediate freeze on all changes. Escalate to engineering leadership."

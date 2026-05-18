@@ -1,0 +1,262 @@
+{
+    "__inputs": [],
+    "__requires": [],
+    "annotations": { "list": [] },
+    "description": "Fintech SRE Simulation — Service Overview Dashboard",
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "id": null,
+    "links": [],
+    "panels": [
+      {
+        "collapsed": false,
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+        "id": 100,
+        "title": "Payment Gateway SLOs",
+        "type": "row"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "orange", "value": 1.0 },
+                { "color": "red", "value": 2.0 }
+              ]
+            },
+            "unit": "s"
+          }
+        },
+        "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+        "id": 1,
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "background" },
+        "title": "Payment Gateway p99 Latency",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{service='payment_gateway'}[5m])) by (le))",
+            "legendFormat": "p99",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "red", "value": 0.05 }
+              ]
+            },
+            "unit": "percentunit",
+            "max": 1
+          }
+        },
+        "gridPos": { "h": 6, "w": 6, "x": 6, "y": 1 },
+        "id": 2,
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+        "title": "Payment Gateway Error Rate",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total{service='payment_gateway',status_code=~'5..'}[5m])) / sum(rate(http_requests_total{service='payment_gateway'}[5m]))",
+            "legendFormat": "error rate",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 0.2 },
+                { "color": "green", "value": 0.5 }
+              ]
+            },
+            "unit": "percentunit",
+            "max": 1
+          }
+        },
+        "gridPos": { "h": 6, "w": 6, "x": 12, "y": 1 },
+        "id": 3,
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+        "title": "SLO Error Budget Remaining",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "min(slo_error_budget_remaining_ratio{service='payment_gateway'})",
+            "legendFormat": "budget",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }
+        },
+        "gridPos": { "h": 6, "w": 6, "x": 18, "y": 1 },
+        "id": 4,
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+        "title": "Circuit Breakers Open",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(circuit_breaker_state > 1) or vector(0)",
+            "legendFormat": "open CBs",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 2 } } },
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+        "id": 5,
+        "title": "Request Latency by Service (p50/p99)",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))",
+            "legendFormat": "p99 {{service}}",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service))",
+            "legendFormat": "p50 {{service}}",
+            "refId": "B"
+          }
+        ],
+        "options": {
+          "tooltip": { "mode": "multi" },
+          "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }
+        }
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": { "defaults": { "unit": "reqps" } },
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+        "id": 6,
+        "title": "Request Rate by Service",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total[1m])) by (service)",
+            "legendFormat": "{{service}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "collapsed": false,
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+        "id": 101,
+        "title": "Database & Infrastructure",
+        "type": "row"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "max": 1,
+            "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.7 }, { "color": "orange", "value": 0.85 }, { "color": "red", "value": 0.95 } ] },
+            "custom": { "lineWidth": 2, "fillOpacity": 10 }
+          }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+        "id": 7,
+        "title": "DB Connection Pool Utilisation",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "db_connection_pool_active / db_connection_pool_max",
+            "legendFormat": "{{db}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "lineWidth": 2 } } },
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+        "id": 8,
+        "title": "Service Memory RSS",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "process_memory_rss_bytes",
+            "legendFormat": "{{service}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "collapsed": false,
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+        "id": 102,
+        "title": "Payments Business Metrics",
+        "type": "row"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": { "defaults": { "unit": "short" } },
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+        "id": 9,
+        "title": "Payment Transactions by Status",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum(rate(payment_transactions_total[1m])) by (status)",
+            "legendFormat": "{{status}}",
+            "refId": "A"
+          }
+        ]
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.02 }, { "color": "red", "value": 0.05 } ] },
+            "unit": "percentunit"
+          }
+        },
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+        "id": 10,
+        "title": "Fraud Score Distribution",
+        "type": "histogram",
+        "targets": [
+          {
+            "expr": "sum(rate(fraud_score_bucket[5m])) by (le, decision)",
+            "legendFormat": "{{decision}} {{le}}",
+            "refId": "A"
+          }
+        ]
+      }
+    ],
+    "refresh": "10s",
+    "schemaVersion": 38,
+    "tags": ["fintech", "sre", "simulation"],
+    "time": { "from": "now-30m", "to": "now" },
+    "timepicker": {},
+    "timezone": "browser",
+    "title": "Fintech SRE Simulation — Overview",
+    "uid": "fintech-sim-overview",
+    "version": 1
+  }
