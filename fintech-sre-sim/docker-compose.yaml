@@ -1,0 +1,180 @@
+version: "3.8"
+
+# Fintech SRE Simulation Environment — Full Observability Stack
+# Services: Prometheus, Grafana, Loki, Tempo, Alertmanager, OTel Collector
+# + the simulation data generator itself
+
+networks:
+  sim-net:
+    driver: bridge
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  tempo_data:
+
+services:
+  
+  # Data generator (metrics + logs + traces)
+  sim-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m generators.main --mode steady --metrics-port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+      - ./logs:/app/logs
+    networks:
+      - sim-net
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+
+  # Prometheus — metrics collection and alerting
+ 
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts:/etc/prometheus/alerts:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    networks:
+      - sim-net
+    restart: unless-stopped
+
+
+  # Alertmanager — routes alerts to Slack/PagerDuty (webhook simulation)
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks:
+      - sim-net
+    restart: unless-stopped
+
+
+  # Loki — log aggregation (receives structured JSON from generator)
+  
+  loki:
+    image: grafana/loki:2.9.6
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./config/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - sim-net
+    restart: unless-stopped
+
+
+  # Promtail — ships container logs to Loki
+
+  promtail:
+    image: grafana/promtail:2.9.6
+    volumes:
+      - ./config/promtail.yml:/etc/promtail/config.yml:ro
+      - ./logs:/var/log/sim:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - sim-net
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Tempo — distributed tracing backend
+  # ---------------------------------------------------------------------------
+  # tempo:
+  #   image: grafana/tempo:2.4.1
+  #   ports:
+  #     - "3200:3200"     # tempo HTTP
+  #     - "4317:4317"     # OTel gRPC
+  #     - "4318:4318"     # OTel HTTP
+  #   volumes:
+  #     - ./config/tempo.yml:/etc/tempo.yaml:ro
+  #     - tempo_data:/tmp/tempo
+  #   command: [ "-config.file=/etc/tempo.yaml" ]
+  #   networks:
+  #     - sim-net
+  #   restart: unless-stopped
+
+ 
+  # OpenTelemetry Collector — receives traces, exports to Tempo
+
+  # otel-collector:
+  #   image: otel/opentelemetry-collector-contrib:0.98.0
+  #   ports:
+  #     - "4319:4317"     # gRPC receiver (internal)
+  #     - "8888:8888"     # collector own metrics
+  #     - "8889:8889"     # Prometheus exporter (collector metrics)
+  #   volumes:
+  #     - ./config/otel_collector.yml:/etc/otelcol-contrib/config.yaml:ro
+  #   networks:
+  #     - sim-net
+  #   depends_on:
+  #     - tempo
+  #   restart: unless-stopped
+
+ 
+  # Grafana — unified dashboards for metrics, logs, traces
+  
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    networks:
+      - sim-net
+    depends_on:
+      - prometheus
+      - loki
+      #- tempo
+    restart: unless-stopped
+
+
+  # Webhook receiver — simulates PagerDuty/Slack for alert routing
+  webhook-sink:
+    image: python:3.11-slim
+    command: >
+      python -c "
+      from http.server import HTTPServer, BaseHTTPRequestHandler
+      import json, datetime
+      class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+          n = int(self.headers.get('Content-Length', 0))
+          body = json.loads(self.rfile.read(n))
+          print(f'[{datetime.datetime.now().isoformat()}] ALERT: {json.dumps(body, indent=2)}')
+          self.send_response(200); self.end_headers()
+        def log_message(self, *a): pass
+      HTTPServer(('0.0.0.0', 9095), H).serve_forever()
+      "
+    ports:
+      - "9095:9095"
+    networks:
+      - sim-net
+    restart: unless-stopped
