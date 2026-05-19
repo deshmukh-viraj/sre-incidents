@@ -6,6 +6,7 @@ regulatory event markers, and anomaly patterns tied to scenario state.
 """
 
 import json
+import os
 import time
 import uuid
 import random
@@ -316,7 +317,10 @@ class LogGenerator:
 
     def start(self):
         if self.output_file:
-            self._file = open(self.output_file, "a")
+            parent = os.path.dirname(self.output_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            self._file = open(self.output_file, "a", encoding="utf-8")
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()

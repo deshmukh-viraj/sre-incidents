@@ -30,18 +30,28 @@ def main():
     )
     parser.add_argument("--metrics-port", type=int, default=8000)
     parser.add_argument("--log-file", type=str, default=None, help="Write logs to file (default: stdout)")
+    parser.add_argument(
+        "--duration-minutes",
+        type=float,
+        default=None,
+        help="Stop after N minutes (default: 15 when --log-file is set; use 0 for no limit)",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for deterministic replay")
     args = parser.parse_args()
+
+    duration_minutes = args.duration_minutes
+    if duration_minutes is None and args.log_file:
+        duration_minutes = 15.0
+    elif duration_minutes is not None and duration_minutes <= 0:
+        duration_minutes = None
 
     if args.seed is not None:
         import random
         random.seed(args.seed)
         print(f"[main] Using random seed: {args.seed}")
 
-    # Start metric exposition server
     start_metrics_server(args.metrics_port)
 
-    # Start generators
     metrics_gen = MetricsGenerator(tick_interval=0.1)
 
     if args.log_file and os.path.exists(args.log_file):
@@ -53,14 +63,20 @@ def main():
     metrics_gen.start()
     log_gen.start()
 
+    deadline = None
+    if duration_minutes is not None:
+        deadline = time.time() + duration_minutes * 60
+
     print(f"[main] Simulation running — mode: {args.mode}")
     print(f"[main] Metrics: http://localhost:{args.metrics_port}/metrics")
     print(f"[main] Logs: {'stdout' if not args.log_file else args.log_file}")
+    if deadline:
+        print(f"[main] Will stop automatically after {duration_minutes} minutes")
 
     def on_phase(scenario_name, phase_name):
         print(f"[main] Phase change → {scenario_name}:{phase_name}")
 
-    def shutdown(sig, frame):
+    def shutdown(sig=None, frame=None):
         print("\n[main] Shutting down...")
         scenario_engine.stop()
         metrics_gen.stop()
@@ -70,21 +86,39 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    if args.mode == "steady":
-        print("[main] Running in steady-state baseline mode. Ctrl+C to stop.")
-        while True:
+    def timed_out() -> bool:
+        return deadline is not None and time.time() >= deadline
+
+    def wait_until_deadline():
+        while not timed_out():
             time.sleep(1)
+        if timed_out():
+            print("[main] Duration reached — stopping.")
+            shutdown()
+
+    if args.mode == "steady":
+        if deadline:
+            print(f"[main] Steady-state mode ({duration_minutes} min). Ctrl+C to stop early.")
+        else:
+            print("[main] Running in steady-state baseline mode. Ctrl+C to stop.")
+        wait_until_deadline()
     elif args.mode == "scenario":
         print(f"[main] Injecting scenario: {args.scenario} in 5s...")
-        time.sleep(5)
-        scenario_engine.run_scenario(args.scenario, on_phase_change=on_phase)
-        print("[main] Scenario complete. Continuing steady state. Ctrl+C to stop.")
-        while True:
+        for _ in range(5):
+            if timed_out():
+                shutdown()
             time.sleep(1)
+        if not timed_out():
+            scenario_engine.run_scenario(args.scenario, on_phase_change=on_phase)
+        print("[main] Scenario complete. Continuing steady state.")
+        wait_until_deadline()
     elif args.mode == "training":
         print("[main] Starting full training sequence...")
-        scenario_engine.run_training_sequence(interval_between=30.0)
+        if not timed_out():
+            scenario_engine.run_training_sequence(interval_between=30.0)
         print("[main] Training sequence complete.")
+        if timed_out():
+            shutdown()
 
 
 if __name__ == "__main__":
