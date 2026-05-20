@@ -273,7 +273,7 @@ PHASE 3 — LOCAL OBSERVABILITY STACK (Docker Compose)
           receivers: [otlp]
           exporters: [otlp]
 
-16. Add Dockerfile.generator to root:
+16. Add Dockerfile to root:
 
     FROM python:3.10-slim
     WORKDIR /app
