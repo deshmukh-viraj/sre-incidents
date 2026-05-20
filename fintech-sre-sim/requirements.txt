@@ -5,3 +5,10 @@ opentelemetry-exporter-otlp
 opentelemetry-exporter-otlp-proto-grpc
 requests
 pydantic
+langchain
+groq
+langchain
+langchain-community
+faiss-cpu
+sentence-transformers
+huggingface

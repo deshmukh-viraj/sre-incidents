@@ -1,0 +1,1272 @@
+==================================================================================
+       MULTI-AGENT SRE INCIDENT RESPONSE ORCHESTRATOR
+       Fintech SRE Simulation Environment + LangGraph Agent System
+       Full Project Workflow — End to End
+==================================================================================
+
+PROJECT OVERVIEW:
+  - Simulation layer:   Generates realistic metrics (Prometheus), structured JSON
+                        logs (Loki), and traces (OTel/Tempo) for a 6-service
+                        fintech topology across 6 failure scenarios.
+  - Agent layer:        LangGraph state-graph orchestrating 4 specialised agents
+                        (Detector, Diagnoser, Remediator, Communicator) that
+                        detect, diagnose, and remediate incidents autonomously
+                        with human-in-the-loop gates for destructive actions.
+  - API layer:          FastAPI exposing incident lifecycle endpoints.
+  - Evaluation layer:   Deterministic + LLM-as-judge evaluation, MTTR dashboard.
+  - Deployment:         Docker Compose (local) → ECR + EKS (production).
+
+TECH STACK:
+  Python 3.10 | LangGraph | FastAPI | OpenAI GPT-4o | Ollama (Llama3 fallback)
+  FAISS | SQLite → Redis | Prometheus | Grafana | Loki | Tempo | Alertmanager
+  DVC + S3 | MLflow + DagShub | Docker Compose | GitHub Actions | AWS EKS
+
+==================================================================================
+
+
+----------------------------------------------------------------------------------
+PHASE 1 — PROJECT STRUCTURE & ENVIRONMENT SETUP
+----------------------------------------------------------------------------------
+
+1.  Create GitHub repo (name: sre-agent-orchestrator), clone it locally:
+    git clone https://github.com/<your-username>/sre-agent-orchestrator.git
+    cd sre-agent-orchestrator
+
+2.  Create conda environment named 'sre':
+    conda create -n sre python=3.10
+    conda activate sre
+
+3.  Create the full project directory structure manually:
+
+    sre-agent-orchestrator/
+    ├── generators/
+    │   ├── __init__.py
+    │   ├── main.py
+    │   ├── metrics_generator.py
+    │   ├── log_generator.py
+    │   ├── trace_generator.py            << build in Phase 3
+    │   └── scenario_engine.py
+    ├── agents/
+    │   ├── __init__.py
+    │   ├── orchestrator.py               << LangGraph state graph
+    │   ├── detector_agent.py
+    │   ├── diagnoser_agent.py
+    │   ├── remediator_agent.py
+    │   └── communicator_agent.py
+    ├── tools/
+    │   ├── __init__.py
+    │   ├── prometheus_tool.py            << query Prometheus API
+    │   ├── loki_tool.py                  << query Loki/LogQL
+    │   ├── tempo_tool.py                 << query Tempo traces
+    │   ├── kubectl_tool.py               << dry-run k8s actions
+    │   └── runbook_retrieval_tool.py     << FAISS RAG over runbooks
+    ├── rag/
+    │   ├── __init__.py
+    │   ├── ingest_runbooks.py            << chunk + embed runbooks → FAISS
+    │   └── retriever.py
+    ├── evaluation/
+    │   ├── __init__.py
+    │   ├── evaluator.py                  << deterministic + LLM-as-judge
+    │   └── metrics_logger.py
+    ├── api/
+    │   ├── __init__.py
+    │   ├── app.py                        << FastAPI entry point
+    │   ├── routes/
+    │   │   ├── incidents.py
+    │   │   └── agents.py
+    │   └── schemas.py                    << Pydantic models
+    ├── runbooks/
+    │   ├── RB-001_payment_latency_spike.md
+    │   ├── RB-002_circuit_breaker_trip.md
+    │   ├── RB-003_data_exfiltration.md
+    │   ├── RB-004_db_connection_exhaustion.md
+    │   ├── RB-005_compliance_audit.md
+    │   └── RB-006_fraud_model_degradation.md
+    ├── alerts/
+    │   └── payment_alerts.yml
+    ├── dashboards/
+    │   └── fintech_overview.json
+    ├── config/
+    │   ├── prometheus.yml
+    │   ├── loki-config.yml
+    │   ├── tempo-config.yml
+    │   ├── promtail-config.yml
+    │   ├── alertmanager.yml
+    │   ├── otel-collector-config.yml
+    │   └── grafana-datasources.yml
+    ├── tests/
+    │   ├── test_agents.py
+    │   ├── test_generators.py
+    │   ├── test_api.py
+    │   └── test_evaluation.py
+    ├── notebooks/
+    │   └── 01_agent_experiments.ipynb    << MLflow experiment tracking
+    ├── data/                             << DVC-tracked
+    │   ├── simulation_runs/
+    │   └── faiss_index/
+    ├── scripts/
+    │   ├── run_simulation.sh
+    │   └── seed_scenarios.sh
+    ├── docker-compose.yml
+    ├── Dockerfile
+    ├── Dockerfile.generator
+    ├── deployment.yaml                   << K8s manifest
+    ├── params.yaml                       << all tunable params
+    ├── dvc.yaml
+    ├── requirements.txt
+    ├── .env.example
+    └── .github/
+        └── workflows/
+            └── ci.yaml
+
+4.  Copy all generator files already built into generators/ directory:
+    (metrics_generator.py, log_generator.py, scenario_engine.py, main.py)
+
+5.  Create .env file (never commit this — add to .gitignore):
+    OPENAI_API_KEY=sk-...
+    DAGSHUB_TOKEN=<your-dagshub-token>
+    AWS_ACCESS_KEY_ID=<your-key>
+    AWS_SECRET_ACCESS_KEY=<your-secret>
+    AWS_REGION=us-east-1
+    ANTHROPIC_API_KEY=<optional-fallback>
+    OLLAMA_BASE_URL=http://localhost:11434
+
+6.  Create .gitignore — make sure these are excluded:
+    .env
+    __pycache__/
+    *.pyc
+    data/
+    local_s3/
+    faiss_index/
+    *.db
+    logs/
+
+7.  git add . && git commit -m "feat: initial project structure" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 2 — CORE DEPENDENCIES INSTALLATION
+----------------------------------------------------------------------------------
+
+8.  Install all core dependencies:
+    pip install langgraph langchain langchain-openai langchain-community
+    pip install openai anthropic
+    pip install fastapi uvicorn[standard] pydantic
+    pip install prometheus-client
+    pip install faiss-cpu sentence-transformers
+    pip install sqlalchemy aiosqlite redis
+    pip install httpx requests
+    pip install python-dotenv
+    pip install opentelemetry-api opentelemetry-sdk
+    pip install opentelemetry-exporter-otlp opentelemetry-exporter-otlp-proto-grpc
+
+9.  Install experiment tracking and data versioning:
+    pip install mlflow dagshub
+    pip install dvc dvc[s3]
+    pip install awscli
+
+10. Install evaluation and testing deps:
+    pip install pytest pytest-asyncio pytest-cov
+    pip install deepeval                   << LLM-as-judge evaluation framework
+
+11. Install observability and dev tools:
+    pip install pipreqs
+
+12. Freeze requirements:
+    pip freeze > requirements.txt
+
+13. git add . && git commit -m "feat: requirements locked" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 3 — LOCAL OBSERVABILITY STACK (Docker Compose)
+----------------------------------------------------------------------------------
+>> This gives you the full signal pipeline: metrics → Prometheus, logs → Loki,
+>> traces → Tempo, all unified in Grafana.
+>> You must have Docker Desktop running before this phase.
+
+14. Verify docker-compose.yml has all 8 services:
+    sim-generator, prometheus, alertmanager, loki, promtail, tempo,
+    otel-collector, grafana, webhook-sink
+    (refer to the docker-compose.yml already built in the project)
+
+15. Fill in missing config files:
+
+    >> config/loki-config.yml:
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+    ingester:
+      lifecycler:
+        ring:
+          kvstore: { store: inmemory }
+          replication_factor: 1
+    schema_config:
+      configs:
+        - from: 2024-01-01
+          store: boltdb-shipper
+          object_store: filesystem
+          schema: v11
+          index: { prefix: index_, period: 24h }
+    storage_config:
+      boltdb_shipper:
+        active_index_directory: /loki/boltdb-shipper-active
+        cache_location: /loki/boltdb-shipper-cache
+        shared_store: filesystem
+      filesystem:
+        directory: /loki/chunks
+    limits_config:
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+    compactor:
+      working_directory: /loki/boltdb-shipper-compactor
+      shared_store: filesystem
+
+    >> config/tempo-config.yml:
+    server:
+      http_listen_port: 3200
+    distributor:
+      receivers:
+        otlp:
+          protocols: { grpc: { endpoint: 0.0.0.0:4317 }, http: { endpoint: 0.0.0.0:4318 } }
+    storage:
+      trace:
+        backend: local
+        local: { path: /tmp/tempo/blocks }
+        wal: { path: /tmp/tempo/wal }
+
+    >> config/promtail-config.yml:
+    server: { http_listen_port: 9080 }
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+    scrape_configs:
+      - job_name: sim-logs
+        static_configs:
+          - targets: [localhost]
+            labels:
+              job: sim-generator
+              __path__: /var/log/sim/*.jsonl
+
+    >> config/alertmanager.yml:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: webhook-sink
+    receivers:
+      - name: webhook-sink
+        webhook_configs:
+          - url: http://webhook-sink:9095
+
+    >> config/otel-collector-config.yml:
+    receivers:
+      otlp:
+        protocols:
+          grpc: { endpoint: 0.0.0.0:4317 }
+          http: { endpoint: 0.0.0.0:4318 }
+    exporters:
+      otlp:
+        endpoint: tempo:4317
+        tls: { insecure: true }
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          exporters: [otlp]
+
+16. Add Dockerfile.generator to root:
+
+    FROM python:3.10-slim
+    WORKDIR /app
+    COPY requirements.txt .
+    RUN pip install prometheus_client opentelemetry-api opentelemetry-sdk \
+        opentelemetry-exporter-otlp opentelemetry-exporter-otlp-proto-grpc
+    COPY generators/ ./generators/
+    CMD ["python", "-m", "generators.main", "--mode", "steady", "--metrics-port", "8000"]
+
+17. Start the full observability stack:
+    docker-compose up -d
+
+18. Verify all containers are healthy:
+    docker-compose ps
+    >> All 8 services should show "Up"
+
+19. Verify endpoints are reachable:
+    curl http://localhost:8000/metrics            << Prometheus metrics endpoint
+    curl http://localhost:9090/-/healthy          << Prometheus UI
+    curl http://localhost:3000                    << Grafana (admin/admin)
+    curl http://localhost:3100/ready             << Loki
+    curl http://localhost:3200/ready             << Tempo
+    curl http://localhost:9093/-/healthy         << Alertmanager
+
+20. Inject a test scenario to verify end-to-end signal flow:
+    conda activate sre
+    python -m generators.main --mode scenario --scenario payment_latency_spike
+    >> Open Grafana → Explore → Prometheus → query: http_request_duration_seconds
+    >> Should see p99 latency spike for payment_gateway
+
+21. Import the Grafana dashboard:
+    Grafana UI → Dashboards → Import → Upload JSON → select dashboards/fintech_overview.json
+    >> You should see all 6 services with live data
+
+22. git add . && git commit -m "feat: observability stack running" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 4 — RAG LAYER: RUNBOOK INGESTION INTO FAISS
+----------------------------------------------------------------------------------
+>> Agents use this to retrieve relevant runbook context during diagnosis.
+>> FAISS stores embeddings locally; no external vector DB needed for MVP.
+
+23. Build rag/ingest_runbooks.py:
+    - Read all .md files from runbooks/
+    - Chunk by heading (each H2 section = one chunk)
+    - Embed with sentence-transformers (model: all-MiniLM-L6-v2)
+    - Store in FAISS index at data/faiss_index/
+
+    Key logic:
+    from langchain.text_splitter import MarkdownHeaderTextSplitter
+    from langchain_community.vectorstores import FAISS
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    # chunk → embed → FAISS.from_documents(docs, embeddings)
+    # db.save_local("data/faiss_index")
+
+24. Build rag/retriever.py:
+    - Load FAISS index from disk
+    - Expose retrieve(query: str, k: int = 3) → List[Document]
+    - Used by diagnoser_agent as a LangChain tool
+
+25. Run initial ingestion of all 6 runbooks:
+    python -m rag.ingest_runbooks
+    >> Output: "Ingested 6 runbooks → 48 chunks → saved to data/faiss_index/"
+
+26. Verify retrieval works:
+    python -c "
+    from rag.retriever import retrieve
+    results = retrieve('circuit breaker postgres connection pool')
+    for r in results: print(r.metadata['source'], r.page_content[:100])
+    "
+    >> Should return chunks from RB-002 and RB-004
+
+27. git add . && git commit -m "feat: FAISS runbook RAG layer" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 5 — LANGGRAPH MULTI-AGENT SYSTEM
+----------------------------------------------------------------------------------
+>> Build the 4 agents + orchestrator state machine.
+>> Shared state object flows through: Detector → Orchestrator → [Diagnoser ||
+>> Remediator || Communicator in parallel] → Human Gate → Execution.
+
+28. Define the shared AgentState (agents/orchestrator.py):
+    from langgraph.graph import StateGraph, END
+    from typing import TypedDict, List, Optional
+
+    class AgentState(TypedDict):
+        incident_id: str
+        raw_signals: dict           << from Prometheus/Loki/Tempo
+        incident_summary: str       << Detector output
+        severity: str               << SEV1..SEV5
+        hypotheses: List[dict]      << [{hypothesis, evidence, confidence}, ...]
+        root_cause: Optional[str]
+        action_plan: List[dict]     << [{action, blast_radius, reversible}, ...]
+        requires_approval: bool
+        human_approved: bool
+        communication_draft: str
+        resolution_status: str      << open|investigating|mitigated|resolved
+        mttr_seconds: Optional[int]
+        active_scenario: Optional[str]
+
+29. Build detector_agent.py:
+    - Input: raw_signals dict (metric values, log excerpts, alert name)
+    - Uses: Prometheus tool to get current p99, error_rate, SLO budget
+    - Uses: Loki tool to get last 20 error logs for affected service
+    - Output: incident_summary string + severity classification
+    - Prompt pattern: "Given these signals: {signals}, classify the incident
+      severity (SEV1-5) and write a 2-sentence incident summary."
+    - Output schema (Pydantic): IncidentSummary(severity, summary, affected_services)
+
+30. Build diagnoser_agent.py (most complex agent):
+    - Input: incident_summary + raw_signals
+    - Uses: runbook_retrieval_tool (FAISS) to get relevant runbook chunks
+    - Uses: prometheus_tool, loki_tool, tempo_tool for evidence gathering
+    - Runs 3 parallel hypothesis probes using LangGraph parallel branches
+    - Output: hypotheses list with confidence scores
+    - CRITICAL: Must output structured Pydantic schema:
+      DiagnosisResult(hypotheses=[{hypothesis, evidence, confidence, alternative}])
+    - Confidence gate: if max(confidence) < 0.70 → set requires_approval=True
+
+31. Build remediator_agent.py:
+    - Input: root_cause + action_plan from diagnoser
+    - Uses: kubectl_tool (dry-run mode ONLY unless approved)
+    - Blast radius classification logic (build as separate function):
+      "pod" → auto-approve | "service" → warn | "cluster" → always human gate
+    - Sets requires_approval=True for any action where reversible=False
+    - Output: action_plan list with blast_radius tags
+
+32. Build communicator_agent.py:
+    - Input: incident_summary + root_cause + resolution_status
+    - Generates 3 outputs simultaneously:
+      a) status_page_update (customer-facing, no internal details)
+      b) war_room_summary (internal Slack, technical detail)
+      c) escalation_message (if severity SEV1/SEV2)
+    - Runs independently of Diagnoser/Remediator (pure parallel)
+
+33. Build orchestrator.py — the LangGraph state graph:
+
+    graph = StateGraph(AgentState)
+
+    graph.add_node("detector",       run_detector)
+    graph.add_node("diagnoser",      run_diagnoser)
+    graph.add_node("remediator",     run_remediator)
+    graph.add_node("communicator",   run_communicator)
+    graph.add_node("human_gate",     human_approval_gate)
+    graph.add_node("execute",        execute_remediation)
+
+    graph.set_entry_point("detector")
+
+    graph.add_edge("detector", "diagnoser")
+    graph.add_edge("detector", "communicator")    << parallel branch
+
+    graph.add_conditional_edges("diagnoser", route_after_diagnosis, {
+        "remediate": "remediator",
+        "escalate":  END,            << low confidence → human escalation
+    })
+
+    graph.add_conditional_edges("remediator", check_approval_needed, {
+        "needs_approval": "human_gate",
+        "auto_approved":  "execute",
+    })
+
+    graph.add_edge("human_gate", "execute")
+    graph.add_edge("execute",    END)
+
+    app = graph.compile(checkpointer=SqliteSaver("data/incident_state.db"))
+
+    >> SqliteSaver gives you persistence + replay for free (MVP)
+    >> Switch to RedisSaver for production scale
+
+34. Build human_approval_gate node:
+    - Saves action_plan to SQLite pending_approvals table
+    - Calls webhook: POST http://localhost:9095/approvals with action details
+    - Polls every 5s for up to APPROVAL_TIMEOUT_SECONDS (from params.yaml)
+    - If no response within timeout → escalate, do NOT auto-approve
+    - Returns: human_approved: True/False
+
+35. Test the agent graph end-to-end locally (no Docker needed):
+    conda activate sre
+
+    # In terminal 1: start the simulation generator
+    python -m generators.main --mode scenario --scenario db_connection_exhaustion
+
+    # In terminal 2: fire a test incident through the agent
+    python -c "
+    from agents.orchestrator import app
+    from agents.detector_agent import poll_for_alerts
+
+    signals = poll_for_alerts()   # reads from Prometheus HTTP API
+    result = app.invoke({'raw_signals': signals, 'incident_id': 'INC-TEST-001'})
+    print('Root cause:', result['root_cause'])
+    print('Confidence:', result['hypotheses'][0]['confidence'])
+    print('Action plan:', result['action_plan'])
+    print('MTTR:', result['mttr_seconds'], 'seconds')
+    "
+
+36. Tune params.yaml (all LangGraph tunable params go here):
+
+    agent:
+      model: gpt-4o
+      fallback_model: llama3          << via Ollama
+      temperature: 0.1                << low = less hallucination
+      max_tokens: 1000
+      diagnosis_confidence_threshold: 0.70
+      approval_timeout_seconds: 300   << 5 min human gate timeout
+      max_diagnosis_loops: 3          << prevent infinite re-diagnosis
+
+    simulation:
+      metrics_port: 8000
+      log_tick_interval: 0.5
+      metrics_tick_interval: 0.1
+
+    evaluation:
+      mttr_target_seconds: 300        << 5-min MTTR target
+      resolution_success_threshold: 0.95
+
+37. git add . && git commit -m "feat: LangGraph 4-agent system" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 6 — FASTAPI APPLICATION LAYER
+----------------------------------------------------------------------------------
+
+38. Build api/app.py:
+    from fastapi import FastAPI
+    from prometheus_client import make_asgi_app
+
+    app = FastAPI(title="SRE Agent Orchestrator API")
+
+    # Mount Prometheus metrics endpoint on /metrics
+    metrics_app = make_asgi_app()
+    app.mount("/metrics", metrics_app)
+
+39. Implement API routes (api/routes/incidents.py):
+
+    POST   /incidents                    << create incident, triggers agent graph
+    GET    /incidents                    << list all incidents with status
+    GET    /incidents/{id}               << detail: signals, diagnosis, action_plan
+    POST   /incidents/{id}/resolve       << manually trigger remediation
+    POST   /incidents/{id}/approve       << human approval gate endpoint
+    GET    /agents/status                << health of all 4 agents
+
+40. Key Pydantic schemas (api/schemas.py):
+    - IncidentCreate(raw_signals: dict, source: str)
+    - IncidentResponse(id, severity, status, root_cause, mttr_seconds, ...)
+    - ApprovalRequest(incident_id, action_index, approved: bool, approver: str)
+
+41. Run the FastAPI server locally:
+    uvicorn api.app:app --reload --host 0.0.0.0 --port 8080
+    >> Swagger UI: http://localhost:8080/docs
+
+42. Test all endpoints with curl or Swagger UI:
+    curl -X POST http://localhost:8080/incidents \
+      -H "Content-Type: application/json" \
+      -d '{"raw_signals": {"alert": "PaymentGatewayP99LatencyHigh", "value": 3.2}, "source": "alertmanager"}'
+
+43. git add . && git commit -m "feat: FastAPI incident endpoints" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 7 — MLFLOW EXPERIMENT TRACKING ON DAGSHUB
+----------------------------------------------------------------------------------
+>> Track agent reasoning quality, MTTR, resolution rate across runs.
+>> DagShub hosts the MLflow server for free.
+
+44. Go to https://dagshub.com/dashboard
+45. Create > New Repo > Connect a repo > GitHub > select sre-agent-orchestrator > Connect
+46. Go to your DagShub repo > Remote > Experiments > Copy the MLflow tracking URI
+    >> Format: https://dagshub.com/<username>/sre-agent-orchestrator.mlflow
+
+47. Generate DagShub auth token:
+    DagShub repo > Your Settings > Tokens > Generate new token
+    >> Save it: sre_agent: <your-dagshub-token-here>
+    >> Add to .env: DAGSHUB_TOKEN=<your-token>
+    >> Add to GitHub Secrets (for CI): Settings > Secrets > DAGSHUB_TOKEN
+
+48. Configure MLflow tracking in evaluation/metrics_logger.py:
+    import mlflow
+    import dagshub
+
+    dagshub.init(repo_owner="<username>", repo_name="sre-agent-orchestrator",
+                 mlflow=True)
+
+    def log_incident_run(incident_result: dict):
+        with mlflow.start_run(run_name=incident_result["incident_id"]):
+            mlflow.log_param("scenario",          incident_result["active_scenario"])
+            mlflow.log_param("model",             incident_result["model_used"])
+            mlflow.log_metric("mttr_seconds",     incident_result["mttr_seconds"])
+            mlflow.log_metric("confidence",       incident_result["max_confidence"])
+            mlflow.log_metric("resolution_ok",    incident_result["resolved_correctly"])
+            mlflow.log_metric("token_cost_usd",   incident_result["token_cost"])
+            mlflow.log_metric("diagnosis_loops",  incident_result["diagnosis_loop_count"])
+
+49. Run experiment notebooks to baseline agent performance:
+    jupyter notebook notebooks/01_agent_experiments.ipynb
+    >> Run each of the 6 scenarios
+    >> Track MTTR, confidence, token cost per scenario in MLflow
+    >> Target: MTTR < 300s, resolution_ok > 0.95
+
+50. View MLflow UI:
+    https://dagshub.com/<username>/sre-agent-orchestrator/experiments
+    OR: mlflow ui --host 0.0.0.0 --port 5000 (local)
+
+51. git add . && git commit -m "feat: MLflow experiment tracking" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 8 — DVC DATA VERSIONING
+----------------------------------------------------------------------------------
+>> Version the FAISS index and simulation run outputs so experiments are
+>> reproducible. S3 is the remote store.
+
+52. Initialise DVC:
+    dvc init
+
+53. Create a local temporary remote (for development before S3):
+    mkdir local_s3
+    dvc remote add -d mylocal local_s3
+
+54. Track data directories with DVC:
+    dvc add data/faiss_index
+    dvc add data/simulation_runs
+    >> This creates data/faiss_index.dvc and data/simulation_runs.dvc
+
+55. Build dvc.yaml (pipeline stages):
+
+    stages:
+      ingest_runbooks:
+        cmd: python -m rag.ingest_runbooks
+        deps:
+          - rag/ingest_runbooks.py
+          - runbooks/
+        outs:
+          - data/faiss_index/
+
+      run_simulation_steady:
+        cmd: python -m generators.main --mode steady --log-file data/simulation_runs/steady.jsonl
+        deps:
+          - generators/metrics_generator.py
+          - generators/log_generator.py
+          - generators/scenario_engine.py
+          - params.yaml
+        outs:
+          - data/simulation_runs/steady.jsonl
+        params:
+          - simulation.log_tick_interval
+          - simulation.metrics_port
+
+56. Run the DVC pipeline:
+    dvc repro
+
+57. Check DVC status:
+    dvc status
+
+58. Push data to local remote:
+    dvc push
+
+59. Create IAM user + S3 bucket on AWS:
+    - IAM user: sre-agent-dvc-user (policies: AmazonS3FullAccess)
+    - S3 bucket: sre-agent-data-<your-account-id> (region: us-east-1)
+    - Keep: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+
+60. Configure AWS CLI:
+    aws configure
+    >> Enter: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, region=us-east-1, format=json
+
+61. Switch DVC remote to S3:
+    dvc remote list                                     << verify current remotes
+    dvc remote remove mylocal                           << remove local (optional)
+    dvc remote add -d myremote s3://sre-agent-data-<account-id>
+    dvc push                                            << push data to S3
+
+62. git add . && git commit -m "feat: DVC pipeline + S3 remote" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 9 — EVALUATION FRAMEWORK
+----------------------------------------------------------------------------------
+>> Two-tier evaluation: (1) deterministic checks, (2) LLM-as-judge.
+>> Powers the Grafana MTTR success dashboard.
+
+63. Build evaluation/evaluator.py with deterministic checks:
+
+    def evaluate_resolution(result: AgentState, ground_truth: dict) -> dict:
+        checks = {
+            "correct_root_cause": result["root_cause"] == ground_truth["root_cause"],
+            "within_mttr_target": result["mttr_seconds"] < params["evaluation"]["mttr_target_seconds"],
+            "no_destructive_action_without_approval": validate_approval_gates(result),
+            "communication_sent": bool(result["communication_draft"]),
+            "confidence_above_threshold": result["hypotheses"][0]["confidence"] >=
+                                          params["agent"]["diagnosis_confidence_threshold"],
+        }
+        checks["resolution_success"] = all(checks.values())
+        return checks
+
+64. Build LLM-as-judge evaluation (evaluation/evaluator.py):
+    - Uses deepeval or direct OpenAI call
+    - Evaluates reasoning quality of diagnosis:
+      Criteria: Faithfulness (evidence supports conclusion), Completeness
+      (all signals considered), Safety (no destructive action recommended
+      without justification)
+    - Returns score 0.0–1.0 per criterion
+
+65. Build evaluation dashboard data export:
+    - Every incident run writes JSON to data/simulation_runs/eval_results/
+    - Prometheus Gauge updated: agent_resolution_success_rate, agent_mttr_p50
+    - Grafana dashboard reads these gauges for the live evaluation panel
+
+66. Run full evaluation suite across all 6 scenarios:
+    python -m evaluation.evaluator --mode full --output data/simulation_runs/eval_results/
+    >> Target output:
+       payment_latency_spike:    MTTR=187s  correct=True  confidence=0.89
+       circuit_breaker_trip:     MTTR=243s  correct=True  confidence=0.81
+       data_exfiltration_alert:  MTTR=156s  correct=True  confidence=0.77
+       db_connection_exhaustion: MTTR=291s  correct=True  confidence=0.84
+       compliance_audit_event:   MTTR=112s  correct=True  confidence=0.92
+       fraud_model_degradation:  MTTR=334s  correct=False confidence=0.61  << needs work
+
+67. git add . && git commit -m "feat: evaluation framework" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 10 — TESTS FOR CI
+----------------------------------------------------------------------------------
+
+68. Add tests/test_generators.py:
+    - test_metrics_emitted: assert Prometheus /metrics returns 200 with expected series
+    - test_log_pan_masking: assert PAN in log record is masked (first6+****+last4)
+    - test_scenario_state_reset: assert SCENARIO object resets after scenario run
+    - test_seasonality_model: assert multiplier(12) > multiplier(3)
+
+69. Add tests/test_agents.py:
+    - test_detector_classifies_sev1: mock high-error-rate signals, assert severity=SEV1
+    - test_diagnoser_confidence_gate: mock low-confidence result, assert requires_approval=True
+    - test_remediator_blast_radius: mock cluster-level action, assert human_gate triggered
+    - test_human_gate_timeout: mock no-response, assert no auto-approval
+
+70. Add tests/test_api.py:
+    - test_post_incident_creates_run: POST /incidents returns 200 with incident_id
+    - test_get_incident_detail: GET /incidents/{id} returns correct schema
+    - test_approve_endpoint: POST /incidents/{id}/approve updates approval state
+
+71. Add tests/test_evaluation.py:
+    - test_deterministic_checks_pass: known-correct result → all checks pass
+    - test_destructive_action_blocked: unapproved destructive action → check fails
+
+72. Run tests locally:
+    pytest tests/ -v --cov=agents --cov=api --cov=generators --cov-report=term-missing
+    >> Aim for > 80% coverage before CI
+
+73. git add . && git commit -m "test: full test suite" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 11 — CI/CD PIPELINE (GitHub Actions)
+----------------------------------------------------------------------------------
+
+74. Create .github/workflows/ci.yaml:
+
+    name: CI — SRE Agent Orchestrator
+
+    on:
+      push:
+        branches: [main, develop]
+      pull_request:
+        branches: [main]
+
+    jobs:
+      test:
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v4
+          - uses: actions/setup-python@v5
+            with: { python-version: "3.10" }
+          - name: Install deps
+            run: pip install -r requirements.txt
+          - name: Set env vars for MLflow
+            env:
+              DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+              OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+            run: echo "env set"
+          - name: Run tests
+            run: pytest tests/ -v --cov=agents --cov=api --cov=generators
+          - name: Upload coverage
+            uses: codecov/codecov-action@v3
+
+      build-push-ecr:
+        needs: test
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/main'
+        steps:
+          - uses: actions/checkout@v4
+          - name: Configure AWS credentials
+            uses: aws-actions/configure-aws-credentials@v4
+            with:
+              aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+              aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+              aws-region:            ${{ secrets.AWS_REGION }}
+          - name: Login to ECR
+            id: login-ecr
+            uses: aws-actions/amazon-ecr-login@v2
+          - name: Build and push image
+            env:
+              ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+              ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+              IMAGE_TAG: ${{ github.sha }}
+            run: |
+              docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+              docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      deploy-eks:
+        needs: build-push-ecr
+        runs-on: ubuntu-latest
+        if: github.ref == 'refs/heads/main'
+        steps:
+          - uses: actions/checkout@v4
+          - name: Configure AWS credentials
+            uses: aws-actions/configure-aws-credentials@v4
+            with:
+              aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+              aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+              aws-region:            ${{ secrets.AWS_REGION }}
+          - name: Update kubeconfig
+            run: aws eks --region ${{ secrets.AWS_REGION }} update-kubeconfig --name sre-agent-cluster
+          - name: Deploy to EKS
+            env:
+              ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+              IMAGE_TAG: ${{ github.sha }}
+            run: |
+              sed -i "s|IMAGE_PLACEHOLDER|$ECR_REGISTRY/${{ secrets.ECR_REPOSITORY }}:$IMAGE_TAG|g" deployment.yaml
+              kubectl apply -f deployment.yaml
+
+75. Add GitHub Secrets (Settings > Secrets and Variables > Actions):
+    AWS_ACCESS_KEY_ID         << from IAM user
+    AWS_SECRET_ACCESS_KEY     << from IAM user
+    AWS_REGION                us-east-1
+    AWS_ACCOUNT_ID            << 12-digit AWS account ID
+    ECR_REPOSITORY            sre-agent-app
+    DAGSHUB_TOKEN             << from DagShub token page
+    OPENAI_API_KEY            << from OpenAI platform
+
+76. Add IAM permission to the existing user:
+    AmazonEC2ContainerRegistryFullAccess
+    (IAM > Users > sre-agent-dvc-user > Attach Policies)
+
+77. git add . && git commit -m "ci: GitHub Actions workflow" && git push
+    >> Watch the Actions tab — test job should pass, ECR build queued
+
+
+----------------------------------------------------------------------------------
+PHASE 12 — DOCKER BUILD & ECR PUSH
+----------------------------------------------------------------------------------
+
+78. Build the main application Dockerfile (root Dockerfile):
+
+    FROM python:3.10-slim
+    WORKDIR /app
+
+    COPY requirements.txt .
+    RUN pip install --no-cache-dir -r requirements.txt
+
+    COPY agents/       ./agents/
+    COPY api/          ./api/
+    COPY rag/          ./rag/
+    COPY tools/        ./tools/
+    COPY evaluation/   ./evaluation/
+    COPY runbooks/     ./runbooks/
+    COPY params.yaml   .
+    COPY data/faiss_index/ ./data/faiss_index/
+
+    ENV PYTHONUNBUFFERED=1
+    EXPOSE 8080
+
+    CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+
+79. Build image locally first:
+    docker build -t sre-agent-app:latest .
+
+80. Test the image locally:
+    docker run -p 8080:8080 \
+      -e OPENAI_API_KEY=sk-... \
+      -e DAGSHUB_TOKEN=<your-token> \
+      sre-agent-app:latest
+
+    curl http://localhost:8080/docs        << Swagger UI should load
+    curl http://localhost:8080/agents/status
+
+    >> Expected error on first run: OPENAI_API_KEY not set (if env not passed)
+    >> Fix: always pass -e flag or use .env file with docker run --env-file .env
+
+81. Create ECR repository on AWS:
+    aws ecr create-repository --repository-name sre-agent-app --region us-east-1
+    >> Save the URI: <account-id>.dkr.ecr.us-east-1.amazonaws.com/sre-agent-app
+
+82. Push image to ECR manually (first time; CI handles subsequent pushes):
+    aws ecr get-login-password --region us-east-1 \
+      | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
+
+    docker tag sre-agent-app:latest \
+      <account-id>.dkr.ecr.us-east-1.amazonaws.com/sre-agent-app:latest
+
+    docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/sre-agent-app:latest
+
+83. git add . && git commit -m "feat: Dockerfile for API server" && git push
+
+
+----------------------------------------------------------------------------------
+PHASE 13 — EKS CLUSTER SETUP & DEPLOYMENT
+----------------------------------------------------------------------------------
+
+----------------------------------------------------------------------------------
+**** Pre-requisites before EKS setup (Windows PowerShell) ****
+----------------------------------------------------------------------------------
+* Check AWS CLI in use: Get-Command aws
+  If path points to Anaconda env → conflicting install
+
+* Remove pip-based AWS CLI: pip uninstall awscli
+* Verify: aws --version (should show MSI-installed version)
+* Add to System PATH if missing: C:\Program Files\Amazon\AWSCLIV2\
+
+* Download kubectl:
+  Invoke-WebRequest -Uri "https://dl.k8s.io/release/v1.28.2/bin/windows/amd64/kubectl.exe" -OutFile "kubectl.exe"
+  Move-Item -Path .\kubectl.exe -Destination "C:\Windows\System32"
+  kubectl version --client
+
+* Download eksctl:
+  Invoke-WebRequest -Uri "https://github.com/weaveworks/eksctl/releases/download/v0.158.0/eksctl_Windows_amd64.zip" -OutFile "eksctl.zip"
+  Expand-Archive -Path .\eksctl.zip -DestinationPath .
+  Move-Item -Path .\eksctl.exe -Destination "C:\Windows\System32\eksctl.exe"
+
+* Verify all tools:
+  aws --version
+  kubectl version --client
+  eksctl version
+----------------------------------------------------------------------------------
+
+84. Create EKS cluster (takes ~15 min):
+    eksctl create cluster \
+      --name sre-agent-cluster \
+      --region us-east-1 \
+      --nodegroup-name sre-agent-nodes \
+      --node-type t3.medium \
+      --nodes 2 \
+      --nodes-min 1 \
+      --nodes-max 3 \
+      --managed
+    >> Use t3.medium (not t3.small) — LLM inference needs more RAM
+    >> 2 nodes: 1 for API server, 1 for agent runtime
+
+85. Update kubectl config:
+    aws eks --region us-east-1 update-kubeconfig --name sre-agent-cluster
+
+86. Verify cluster access:
+    aws eks list-clusters
+    kubectl get nodes
+    kubectl get namespaces
+
+87. Create Kubernetes secret for API keys:
+    kubectl create secret generic sre-agent-secret \
+      --from-literal=OPENAI_API_KEY=sk-... \
+      --from-literal=DAGSHUB_TOKEN=<your-token>
+
+88. Create deployment.yaml (Kubernetes manifest):
+
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: sre-agent-app
+      namespace: default
+    spec:
+      replicas: 2
+      selector:
+        matchLabels: { app: sre-agent-app }
+      template:
+        metadata:
+          labels: { app: sre-agent-app }
+        spec:
+          containers:
+            - name: sre-agent-app
+              image: IMAGE_PLACEHOLDER          << replaced by CI with ECR URI
+              ports:
+                - containerPort: 8080
+              env:
+                - name: OPENAI_API_KEY
+                  valueFrom:
+                    secretKeyRef: { name: sre-agent-secret, key: OPENAI_API_KEY }
+                - name: DAGSHUB_TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: sre-agent-secret, key: DAGSHUB_TOKEN }
+              resources:
+                requests: { cpu: "500m", memory: "1Gi" }
+                limits:   { cpu: "2",    memory: "4Gi" }
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: sre-agent-service
+    spec:
+      type: LoadBalancer
+      selector: { app: sre-agent-app }
+      ports:
+        - port: 80
+          targetPort: 8080
+
+89. Deploy manually first time:
+    kubectl apply -f deployment.yaml
+
+90. Monitor rollout:
+    kubectl rollout status deployment/sre-agent-app
+    kubectl get pods
+    kubectl get svc
+
+91. Edit security group to allow inbound port 80:
+    AWS Console > EC2 > Security Groups > find the node security group >
+    Inbound rules > Add rule: HTTP port 80, source 0.0.0.0/0
+
+92. Get LoadBalancer external URL:
+    kubectl get svc sre-agent-service
+    >> Copy EXTERNAL-IP
+
+93. Verify deployment:
+    curl http://<EXTERNAL-IP>/agents/status
+    curl http://<EXTERNAL-IP>/docs
+    >> Should return API health + Swagger UI
+
+94. Deploy via CI/CD (all future deploys):
+    git push origin main
+    >> GitHub Actions: test → build → push to ECR → kubectl apply
+
+
+----------------------------------------------------------------------------------
+PHASE 14 — PROMETHEUS MONITORING SERVER ON EC2
+----------------------------------------------------------------------------------
+>> This Prometheus instance monitors the agent system itself (not the simulation)
+>> Scrapes: /metrics from sre-agent-app + EKS node metrics
+
+95. Launch Ubuntu EC2 for Prometheus:
+    Type: t3.medium | Storage: 20GB gp3
+    Security Group inbound: port 9090 (Prometheus), port 22 (SSH)
+
+96. SSH into instance:
+    ssh -i your-key.pem ubuntu@<ec2-public-ip>
+
+97. Update packages:
+    sudo apt update && sudo apt upgrade -y
+
+98. Download and install Prometheus:
+    wget https://github.com/prometheus/prometheus/releases/download/v2.51.0/prometheus-2.51.0.linux-amd64.tar.gz
+    tar -xvzf prometheus-2.51.0.linux-amd64.tar.gz
+    sudo mv prometheus-2.51.0.linux-amd64 /etc/prometheus
+    sudo mv /etc/prometheus/prometheus /usr/local/bin/
+    which prometheus                          << verify: /usr/local/bin/prometheus
+
+99. Create Prometheus config:
+    sudo nano /etc/prometheus/prometheus.yml
+
+    global:
+      scrape_interval: 15s
+      external_labels:
+        environment: production
+
+    scrape_configs:
+      - job_name: "sre-agent-app"
+        static_configs:
+          - targets: ["<EXTERNAL-IP>:80"]    << replace with EKS LoadBalancer IP
+            labels:
+              service: sre_agent_orchestrator
+
+      - job_name: "sim-generator"
+        static_configs:
+          - targets: ["<EXTERNAL-IP>:8000"]  << if simulation also on EKS
+
+    >> ctrl+o → enter → ctrl+x to save
+    cat /etc/prometheus/prometheus.yml        << verify
+
+100. Run Prometheus:
+     /usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml &
+     >> Access: http://<ec2-prometheus-ip>:9090
+
+101. Verify scrape targets are UP:
+     Prometheus UI > Status > Targets
+     >> sre-agent-app should show State: UP
+
+
+----------------------------------------------------------------------------------
+PHASE 15 — GRAFANA SERVER ON EC2
+----------------------------------------------------------------------------------
+
+102. Launch Ubuntu EC2 for Grafana:
+     Type: t3.medium | Storage: 20GB gp3
+     Security Group inbound: port 3000 (Grafana), port 22 (SSH)
+
+103. SSH into instance:
+     ssh -i your-key.pem ubuntu@<ec2-public-ip>
+
+104. Update packages:
+     sudo apt update && sudo apt upgrade -y
+
+105. Download and install Grafana:
+     wget https://dl.grafana.com/oss/release/grafana_10.4.2_amd64.deb
+     sudo apt install ./grafana_10.4.2_amd64.deb -y
+
+106. Start and enable Grafana:
+     sudo systemctl start grafana-server
+     sudo systemctl enable grafana-server
+     sudo systemctl status grafana-server
+
+107. Open Grafana UI:
+     http://<ec2-grafana-ip>:3000 (default login: admin/admin)
+     >> Change password on first login
+
+108. Add Prometheus as data source:
+     Grafana > Connections > Data Sources > Add > Prometheus
+     URL: http://<ec2-prometheus-ip>:9090
+     Click: Save and Test
+
+109. Import project dashboard:
+     Grafana > Dashboards > Import > Upload JSON
+     >> Upload: dashboards/fintech_overview.json
+     >> Select Prometheus as data source
+
+110. Add key panels to the agent monitoring dashboard:
+     Panel 1: agent_mttr_seconds (Gauge) — target line at 300s
+     Panel 2: agent_resolution_success_rate (Stat) — green > 0.95
+     Panel 3: http_request_duration_seconds for sre-agent-app (Time series)
+     Panel 4: diagnosis_loop_count per incident (Histogram)
+     Panel 5: token_cost_usd per incident (Time series)
+     Panel 6: human_approval_gate_events (Table with action + approver)
+
+111. Set up alerting in Grafana (optional - alternative to Alertmanager):
+     Grafana > Alerting > Alert Rules > New alert rule
+     Condition: agent_resolution_success_rate < 0.80 for 5m → notify Slack
+
+
+----------------------------------------------------------------------------------
+PHASE 16 — TRACE GENERATOR (fills the Phase 2 gap)
+----------------------------------------------------------------------------------
+>> Build generators/trace_generator.py using OTel Python SDK.
+>> This completes the three-pillar observability: metrics + logs + TRACES.
+
+112. Build trace_generator.py:
+     from opentelemetry import trace
+     from opentelemetry.sdk.trace import TracerProvider
+     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
+     provider = TracerProvider()
+     exporter = OTLPSpanExporter(endpoint="http://otel-collector:4317", insecure=True)
+     provider.add_span_processor(BatchSpanProcessor(exporter))
+     trace.set_tracer_provider(provider)
+     tracer = trace.get_tracer("fintech-sim")
+
+     >> For each simulated request, create a parent span (service) with child
+     >> spans for DB call + downstream dependency. Use the same trace_id that
+     >> the log generator already emits — this is the correlation key.
+
+113. Add trace_generator to main.py loop (alongside metrics + logs)
+
+114. Verify trace correlation in Grafana:
+     Grafana > Explore > Loki > find a log with trace_id field
+     Click the trace_id link → should open Tempo waterfall view
+     >> If this works, your three-pillar correlation is complete
+
+
+----------------------------------------------------------------------------------
+PHASE 17 — PHASE 3: SIEM INTEGRATION (Compliance Layer)
+----------------------------------------------------------------------------------
+>> Add Logstash + Elasticsearch for PCI-DSS, GDPR, SOX event correlation.
+
+115. Add SIEM services to docker-compose.yml:
+     elasticsearch:
+       image: elasticsearch:8.13.0
+       environment: { "discovery.type": "single-node", "xpack.security.enabled": "false" }
+       ports: ["9200:9200"]
+
+     logstash:
+       image: logstash:8.13.0
+       volumes: ["./config/logstash.conf:/usr/share/logstash/pipeline/logstash.conf"]
+       ports: ["5044:5044"]
+
+     kibana:
+       image: kibana:8.13.0
+       ports: ["5601:5601"]
+       environment: { "ELASTICSEARCH_HOSTS": "http://elasticsearch:9200" }
+
+116. Create config/logstash.conf:
+     input { beats { port => 5044 } }
+     filter {
+       if [compliance][regulation] == "PCI-DSS" {
+         mutate { add_tag => ["pci_event"] }
+       }
+       if [security_event][event_type] == "bulk_data_export" {
+         mutate { add_tag => ["gdpr_high_risk"] }
+       }
+     }
+     output {
+       if "pci_event" in [tags] { elasticsearch { hosts => ["elasticsearch:9200"] index => "pci-audit-%{+YYYY.MM.dd}" } }
+       else { elasticsearch { hosts => ["elasticsearch:9200"] index => "siem-%{+YYYY.MM.dd}" } }
+     }
+
+117. Update Grafana with Elasticsearch datasource for audit trail dashboard
+
+
+----------------------------------------------------------------------------------
+AWS RESOURCE CLEANUP (run when done)
+----------------------------------------------------------------------------------
+
+* Delete K8s deployment and service:
+  kubectl delete deployment sre-agent-app
+  kubectl delete service sre-agent-service
+  kubectl delete secret sre-agent-secret
+
+* Delete EKS cluster:
+  eksctl delete cluster --name sre-agent-cluster --region us-east-1
+
+* Verify cluster deletion:
+  eksctl get cluster --region us-east-1
+
+* Terminate EC2 instances (Prometheus + Grafana):
+  AWS Console > EC2 > Instances > Select both > Instance State > Terminate
+
+* Delete ECR images and repository (optional):
+  aws ecr batch-delete-image --repository-name sre-agent-app --image-ids imageTag=latest
+  aws ecr delete-repository --repository-name sre-agent-app --force
+
+* Delete S3 bucket contents and bucket (optional):
+  aws s3 rm s3://sre-agent-data-<account-id> --recursive
+  aws s3 rb s3://sre-agent-data-<account-id>
+
+* Validate CloudFormation stacks are gone:
+  AWS Console > CloudFormation > Stacks
+  >> Should see no eksctl-sre-agent-cluster-* stacks remaining
+
+* Confirm service termination on AWS support chat.
+
+
+----------------------------------------------------------------------------------
+BACKGROUND CONCEPTS — READ ONCE
+----------------------------------------------------------------------------------
+
+***** LangGraph vs LangChain *****
+LangChain = library of LLM primitives (prompts, tools, chains).
+LangGraph = state-machine framework built on LangChain for multi-step, branching,
+and cyclic agent workflows. Think of LangChain as the individual functions and
+LangGraph as the control flow graph that connects them. You use both.
+
+***** Why SqliteSaver for MVP (not Redis) *****
+LangGraph checkpointers persist agent state between steps so that if a step
+fails, the graph can resume from the last checkpoint rather than starting over.
+SqliteSaver writes to a local .db file — zero infrastructure, perfect for MVP.
+Switch to RedisSaver when you need horizontal scaling or multi-instance state.
+
+***** Why FAISS instead of Pinecone/Weaviate *****
+FAISS is an in-process vector index (a library, not a server). It requires no
+external service, starts in milliseconds, and is perfectly sufficient for a
+few thousand runbook chunks. Pinecone/Weaviate are network-call vector databases
+needed only when the index is too large for RAM or you need multi-client access.
+
+***** CloudFormation and EKS *****
+eksctl generates CloudFormation templates behind the scenes to provision:
+1. eksctl-sre-agent-cluster-cluster stack → EKS control plane
+2. eksctl-sre-agent-cluster-nodegroup-sre-agent-nodes → worker nodes
+Each stack is a logical group of AWS resources. Always check CloudFormation
+console after cluster deletion to confirm all stacks are removed — orphaned
+stacks continue billing.
+
+***** Fleet Request Quota *****
+When eksctl creates a NodeGroup, AWS provisions EC2 instances via Auto Scaling
+Groups which consume Fleet Request quota. If cluster creation fails with
+"You've reached your quota for maximum Fleet Requests", either delete other
+running ASGs/clusters or request a quota increase in AWS Service Quotas.
+
+***** PVC in Kubernetes *****
+PersistentVolumeClaim (PVC) = a request for storage in Kubernetes.
+If SQLite is used as the agent state store in EKS, you need a PVC backed by
+an EBS volume so state survives pod restarts. Add to deployment.yaml:
+  volumeMounts: [{ mountPath: /app/data, name: agent-state }]
+  volumes: [{ name: agent-state, persistentVolumeClaim: { claimName: agent-pvc } }]
+
+***** Token Cost Management *****
+During a complex incident with 3 diagnostic loops across 4 agents, token usage
+can reach 100k–500k tokens per incident. Track this via the token_cost_usd
+MLflow metric. If a single incident exceeds COST_THRESHOLD (params.yaml),
+force-escalate to human rather than continuing agent loops. Set per-agent
+max_tokens in params.yaml, not hardcoded.
+
+***** Human-in-the-Loop Gate *****
+The human gate MUST be a non-blocking async wait. The agent state is persisted
+to SQLite at the gate point. The FastAPI endpoint POST /incidents/{id}/approve
+resumes the graph from checkpoint. This is why SqliteSaver is essential:
+without it, the graph state is lost if the process restarts during approval wait.
+
+----------------------------------------------------------------------------------
