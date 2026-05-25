@@ -12,3 +12,4 @@ langchain-community
 faiss-cpu
 sentence-transformers
 huggingface
+neo4j

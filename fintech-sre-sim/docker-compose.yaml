@@ -13,6 +13,7 @@ volumes:
   grafana_data:
   loki_data:
   tempo_data:
+  neo4j_data:
 
 services:
   
@@ -178,3 +179,14 @@ services:
     networks:
       - sim-net
     restart: unless-stopped
+
+  neo4j:
+    image: neo4j:latest
+    ports: 
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/sreagentpassword
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
