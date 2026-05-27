@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Fintech SRE Simulation Environment — Full Observability Stack
 # Services: Prometheus, Grafana, Loki, Tempo, Alertmanager, OTel Collector
 # + the simulation data generator itself
@@ -144,7 +142,7 @@ services:
       - ./dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./config/grafana.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASS}
       - GF_SECURITY_ADMIN_USER=admin
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
       - GF_AUTH_ANONYMOUS_ENABLED=true
@@ -186,7 +184,7 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      - NEO4J_AUTH=neo4j/sreagentpassword
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc"]
     volumes:
       - neo4j_data:/data
