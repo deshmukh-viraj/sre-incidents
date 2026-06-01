@@ -240,7 +240,7 @@ SCENARIO_COMPLIANCE_AUDIT = Scenario(
             rps_multiplier={"account_ledger": 1.3},  # log queries
         ),
         ScenarioPhase(name="audit_complete", duration_seconds=30),
-    ],z
+    ],
 )
 
 
