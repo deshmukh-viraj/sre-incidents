@@ -62,7 +62,7 @@ SCENARIO_PAYMENT_LATENCY_SPIKE = Scenario(
         ),
         ScenarioPhase(
             name="peak",
-            duration_seconds=350,
+            duration_seconds=-1,
             latency_multiplier={"payment_gateway": 7.0, "card_rails": 12.0},
             error_rate_override={"payment_gateway": 0.12, "card_rails": 0.18},
         ),
@@ -186,7 +186,7 @@ SCENARIO_DB_CONNECTION_EXHAUSTION = Scenario(
     phases=[
         ScenarioPhase(
             name="leak_growing",
-            duration_seconds=120,
+            duration_seconds=180,
             db_pool_saturation={"postgres_primary": 0.70},
             latency_multiplier={"account_ledger": 2.5},
         ),
@@ -199,7 +199,7 @@ SCENARIO_DB_CONNECTION_EXHAUSTION = Scenario(
         ),
         ScenarioPhase(
             name="pool_exhausted",
-            duration_seconds=60,
+            duration_seconds=-1,
             db_pool_saturation={"postgres_primary": 1.0},
             error_rate_override={"account_ledger": 0.85},
             latency_multiplier={"account_ledger": 20.0},
@@ -240,7 +240,7 @@ SCENARIO_COMPLIANCE_AUDIT = Scenario(
             rps_multiplier={"account_ledger": 1.3},  # log queries
         ),
         ScenarioPhase(name="audit_complete", duration_seconds=30),
-    ],
+    ],z
 )
 
 
@@ -281,6 +281,46 @@ SCENARIO_FRAUD_MODEL_DEGRADATION = Scenario(
     ],
 )
 
+# Scenario 7: Cascading Failure (DB Leak causes payment latency)
+SCENARIO_CASCADING_FAILURE = Scenario(
+    id="RB-CASCADE",
+    name="cascading_failure",
+    description="DB connection leak in account_ledger cause payment_gateway latenc to spike",
+    root_cause="Connection leak in ledger cascading to payment gateway timeout",
+    expected_alerts=[
+        "DBConnectionPoolNearExhaustion",
+        "PaymentGatewayP99LatencyHigh",
+        "SLOErrorBudgetBurnRateFast",
+    ],
+    
+    slo_impact="Latency SLO breach: p99 > 3s for payemnt_gateway; DB pool > 90%",
+    phases=[
+        ScenarioPhase(
+            name="db_leak_starts",
+            duration_seconds=60,
+            db_pool_saturation={"postgres_primary": 0.75},
+            # Both services are affected
+            latency_multiplier={"Payment_gateway":2.0, "account_ledger": 3.0}, 
+            error_rate_override={"account_ledger": 0.05},
+        ),
+        ScenarioPhase(
+            name="cascading_peak",
+            duration_seconds=-1,
+            db_pool_saturation={"postgres_primary": 0.98}, #DB is dyiing
+            latency_multiplier={"payment_gateway": 7.0, "account_ledger": 12.0}, #payment timeout waiting for db
+            error_rate_override={"payment_gateway": 0.15, "account_ledger": 0.40},
+        ),
+        ScenarioPhase(
+            name="recovery",
+            duration_seconds=120,
+            db_pool_saturation={"postgres_primary": 0.30},
+            latency_multiplier={"payment_gateway": 1.2, "account_ledger": 1.5},
+            error_rate_override={"payment_gateway": 0.01, "account_ledger": 0.01},
+
+        ),
+        ScenarioPhase(name="resolved", duration_seconds=30),
+    ],
+)
 
 ALL_SCENARIOS = {
     s.name: s for s in [
@@ -290,6 +330,7 @@ ALL_SCENARIOS = {
         SCENARIO_DB_CONNECTION_EXHAUSTION,
         SCENARIO_COMPLIANCE_AUDIT,
         SCENARIO_FRAUD_MODEL_DEGRADATION,
+        SCENARIO_CASCADING_FAILURE,
     ]
 }
 
@@ -299,6 +340,7 @@ class ScenarioEngine:
     def __init__(self):
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._resolved_event = threading.Event()
 
     def run_scenario(self, scenario_name: str, on_phase_change: Optional[Callable] = None):
         """Execute a scenario synchronously (blocks until complete)."""
@@ -311,31 +353,37 @@ class ScenarioEngine:
         print(f"[scenario]    Expected alerts: {', '.join(scenario.expected_alerts)}")
 
         SCENARIO.active_scenario = scenario.name
-        AUTO_RECOVER = False
+        self._resolved_event.clear()
+        
         try:
             for phase in scenario.phases:
                 if self._stop_event.is_set():
                     break
 
-                print(f"[scenario]   Phase: {phase.name} ({phase.duration_seconds}s)")
 
-                SCENARIO.latency_multiplier   = phase.latency_multiplier
-                SCENARIO.error_rate_override  = phase.error_rate_override
-                SCENARIO.rps_multiplier       = phase.rps_multiplier
-                SCENARIO.db_pool_saturation   = phase.db_pool_saturation
+                SCENARIO.latency_multiplier = phase.latency_multiplier
+                SCENARIO.error_rate_override = phase.error_rate_override
+                SCENARIO.rps_multiplier = phase.rps_multiplier
+                SCENARIO.db_pool_saturation = phase.db_pool_saturation
                 SCENARIO.circuit_breaker_open = phase.circuit_breaker_open
 
                 if phase.on_enter:
                     phase.on_enter()
                 if on_phase_change:
                     on_phase_change(scenario.name, phase.name)
-
-                self._stop_event.wait(timeout=phase.duration_seconds)
+                
+                if phase.duration_seconds == -1:
+                    print(f"[scenario]   Phase: {phase.name} (infinite- waiting for manual resolution)")
+                    while not self._stop_event.is_set() and not self._resolved_event.is_set():
+                        time.sleep(1)
+                
+                else: 
+                    print(f"[scenario]   Phase: {phase.name} ({phase.duration_seconds}s)")
+                    self._stop_event.wait(timeout=phase.duration_seconds)
         
         
         finally:
-            if AUTO_RECOVER:
-                SCENARIO.reset()
+            SCENARIO.reset()
             print(f"[scenario]   Scenario complete: {scenario.name}\n")
 
     def run_scenario_async(self, scenario_name: str, on_phase_change: Optional[Callable] = None):
@@ -347,6 +395,9 @@ class ScenarioEngine:
             daemon=True,
         )
         self._thread.start()
+    
+    def resolve(self):
+        self._resolved_event.set()
 
     def stop(self):
         self._stop_event.set()
