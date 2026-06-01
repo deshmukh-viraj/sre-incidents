@@ -88,3 +88,5 @@ target/
 # Mypy cache
 .mypy_cache/
 mango/
+test.ipynb/
+data/
