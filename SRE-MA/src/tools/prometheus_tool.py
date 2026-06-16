@@ -1,9 +1,8 @@
 """
 tools/prometheus_tool.py
 ------------------------
-Queries the Prometheus HTTP API.
-All metric values agents need are fetched through this single module.
-No PromQL is hardcoded in agent files — all queries live here.
+ask prometheus for metrics.
+we put all the promql queries here so the agents don't have to worry about them.
 """
 
 import os
@@ -16,12 +15,12 @@ load_dotenv()
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 
 
-# ── Low-level query helpers ────────────────────────────────────────────────
+#low level query helpers
 
 def _instant_query(promql: str) -> Optional[float]:
     """
-    Execute an instant PromQL query and return the first scalar result.
-    Returns None if the query returns no data.
+    run a quick promql query and just get the number back.
+    if nothing comes back, return none.
     """
     try:
         resp = httpx.get(
@@ -71,7 +70,7 @@ def _parse_duration(d: str) -> int:
     return {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(unit, 60) * value
 
 
-# ── Named metric queries (used by agents) ─────────────────────────────────
+#named metric queries used by agents
 
 def get_p99_latency(service: str, window: str = "5m") -> Optional[float]:
     """Returns p99 latency in seconds for a given service."""
@@ -159,12 +158,12 @@ def get_rps(service: str, window: str = "1m") -> Optional[float]:
     )
 
 
-# ── Snapshot: collect all key signals for a service at once ───────────────
+#snapshot: collect all key signals for a service at once
 
 def collect_incident_signals(service: str) -> Dict[str, Any]:
     """
-    Called by detector_agent to gather a full metric snapshot.
-    Returns a dict with all relevant signals — no PromQL in agent code.
+    grabs all the important metrics for a service in one go.
+    returns a dict so the detector agent has an easy time.
     """
     signals: Dict[str, Any] = {
         "service": service,
@@ -179,7 +178,7 @@ def collect_incident_signals(service: str) -> Dict[str, Any]:
         "service_memory_mb": get_service_memory_mb(service),
     }
 
-    # Add payment-specific signals
+    # add payment-specific signals
     if service in ("payment_gateway", "api_gateway"):
         signals["payment_decline_rate"] = get_payment_decline_rate()
         signals["fraud_model_latency_p99"] = get_fraud_model_latency_p99()
