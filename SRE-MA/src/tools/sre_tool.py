@@ -17,10 +17,6 @@ from src.tools.loki_tool import (
 
 load_dotenv()
 
-SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL", "")
-JIRA_URL = os.getenv("JIRA_URL", "")
-JIRA_TOKEN = os.getenv("JIRA_API_TOKEN", "")
-JIRA_PROJECT = os.getenv("JIRA_PROJECT_KEY", "SRE")
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 
@@ -58,8 +54,8 @@ def lookup_runbook(
     k: int = 3,
 ) -> Dict[str, Any]:
     """
-    searches FAISS runbook index for relevant context.
-    returns dict with 'context' string ready for LLM injection.
+    look up runbooks in faiss.
+    returns chunks of text we can feed to the llm.
     """
     print(f"[sre_tools] FAISS lookup: '{query[:50]}' runbook_id={runbook_id}")
 
@@ -100,12 +96,11 @@ def execute_remediation(
     action: str,
     tool: str,
     params: Dict[str, Any],
-    approved_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    executes a remediation action.
-    DRY_RUN=true -> prints what would happen, does nothing real.
-    DRY_RUN=false -> calls real endpoints.
+    run the fix.
+    if dry_run is on, just print what we would do.
+    otherwise, actually hit the endpoints.
     """
     ts = datetime.now(timezone.utc).isoformat()
     print(f"[sre_tools] {'[DRY-RUN] ' if DRY_RUN else ''}execute: {tool} — {action[:50]}")
@@ -116,26 +111,30 @@ def execute_remediation(
             "result": f"[DRY-RUN] {_describe_action(tool, params)}",
             "dry_run": True,
             "executed_at": ts,
-            "approved_by": approved_by,
+            
         }
 
     try:
         result = _run_action(tool, params)
-        return {
-            "success": True,
-            "result": result,
-            "dry_run": False,
-            "executed_at": ts,
-            "approved_by": approved_by,
-        }
+        response = httpx.post("http://localhost:8001/control/resolve", timeout=5.0)
+        if response.status_code == 200:
+            return {
+                "success": True,
+                "result": f"Executed {tool}. Infra reacting. ({result})",
+                "dry_run": False,
+                "executed_at": ts,
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"simulator failed to resolve (status {response.status_code})",
+                "dry_run": False,
+                "executed_at": ts,
+            }
+
     except Exception as e:
-        return {
-            "success": False,
-            "result": None,
-            "error": str(e),
-            "dry_run": False,
-            "executed_at": ts,
-        }
+        return {"success": False, "error": str(e), "dry_run": False, "executed_at": ts}
+        
 
 
 def _describe_action(tool: str, params: Dict) -> str:
@@ -158,8 +157,8 @@ def _describe_action(tool: str, params: Dict) -> str:
 
 def _run_action(tool: str, params: Dict) -> str:
     """
-    production action execution.
-    extend this as you wire up real kubectl / API endpoints.
+    the actual logic to run commands in production.
+    add real kubectl stuff here later.
     """
     #feature flags
     if tool == "set_feature_flag":
@@ -220,14 +219,13 @@ def notify_slack(
     if incident_id:
         title += f" [{incident_id}]"
 
-    if DRY_RUN or not SLACK_WEBHOOK:
+    if DRY_RUN :
         print(f"\n[notify_slack] [DRY-RUN] #{channel} | {title}")
         print(f" {message[:200]}")
         return {"success": True, "dry_run": True}
 
     try:
         resp = httpx.post(
-            SLACK_WEBHOOK,
             json={"attachments": [{
                 "color": colors.get(severity, "#36a64f"),
                 "title": title,
@@ -254,8 +252,8 @@ def create_jira(
     runbook_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    creates a jira incident ticket.
-    DRY_RUN or missing config → returns simulated ticket ID.
+    make a jira ticket.
+    if dry run, just pretend.
     """
     priority_map = {"SEV1": "Highest", "SEV2": "High", "SEV3": "Medium",
                     "SEV4": "Low", "SEV5": "Lowest"}
