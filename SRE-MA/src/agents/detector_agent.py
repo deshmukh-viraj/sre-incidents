@@ -21,9 +21,9 @@ from src.tools.sre_tool import collect_all_signals
 
 def detector_node(state: AgentState) -> dict:
     """
-    collects all metric signals and classifies severity.
-    enriches raw_signals with Prometheus + Loki data.
-    never calls the LLM.
+    grab the metrics and figure out how bad it is.
+    add prometheus and loki stuff to raw_signals.
+    no ai used here.
     """
     print(f"\n[detector] Starting detection for incident {state['incident_id']}")
 
@@ -36,7 +36,7 @@ def detector_node(state: AgentState) -> dict:
         if key not in raw or raw[key] is None:
             raw[key] = value
 
-    # classify severity from numbers only
+    # guess severity just from the numbers
     severity = classify_severity({**state, "raw_signals": raw})
 
     print(f"[detector] Severity: {severity} | service: {service}")
@@ -52,7 +52,7 @@ def detector_node(state: AgentState) -> dict:
 
 # Private helper
 def _infer_service(alert_name: str) -> str:
-    """Map alert name keyword to primary service name."""
+    """guess the service based on alert name keywords"""
     mapping = {
         "PaymentGateway":   "payment_gateway",
         "SLOError":         "payment_gateway",
