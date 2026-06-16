@@ -1,7 +1,7 @@
 """
-single shared state object that flows through the entire langgraph
-every agent reads from this and writes back to it
-nnothing else is passed between agents this is the only contract
+one big state object that gets passed around the langgraph nodes.
+every agent reads and writes to this.
+this is the only way they share data.
 """
 
 from typing import TypedDict, List, Optional, Dict, Any
@@ -21,7 +21,10 @@ class ResolutionStatus(str, Enum):
     INVESTIGATING = "investigating"
     MITIGATED = "mitigated"
     RESOLVED = "resolved"
+    EXECUTED_UNVERIFIED = "executed_unverified"
+    WAITING_FOR_APPROVAL = "waiting_for_approval"
     ESCALATED = "escalated"
+    FAILED = "failed"
 
 
 class Hypothesis(TypedDict):
@@ -100,8 +103,8 @@ class AgentState(TypedDict):
 
 def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
     """
-    factory: creates a clean initial agentstate from an incoming alert.
-    call this in the fastAPI endpoint before invoking the graph.
+    factory method: creates a fresh agent state from a new alert.
+    call this in the fastapi route before starting the graph.
     """
     import datetime
 
