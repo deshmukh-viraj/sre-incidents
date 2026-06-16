@@ -3,7 +3,10 @@ main.py — Fintech SRE Simulation Environment entry point
 """
 
 import argparse
+import uvicorn
 import signal
+import threading
+from fastapi import FastAPI
 import sys
 import time
 import os
@@ -14,7 +17,25 @@ from generators.log_generator import LogGenerator
 from scenarios.scenario_engine import ScenarioEngine, ALL_SCENARIOS
 
 
+engine = ScenarioEngine()
+control_api = FastAPI()
+
+@control_api.post("/control/resolve")
+def resolve_scenario():
+    engine.resolve()
+    return {"status": "resolving"}
+
+def start_control_api():
+    """runs in background"""
+    uvicorn.run(control_api, host="0.0.0.0", port=8001, log_level="error")
+
 def main():
+
+    api_thread = threading.Thread(target=start_control_api, daemon=True)
+    api_thread.start()
+    print("[control] simulator control API started on port:8001")
+
+
     parser = argparse.ArgumentParser(description="Fintech SRE Simulation Environment")
     parser.add_argument(
         "--mode",
@@ -58,7 +79,6 @@ def main():
         os.remove(args.log_file)
 
     log_gen = LogGenerator(output_file=args.log_file, tick_interval=0.5)
-    scenario_engine = ScenarioEngine()
 
     metrics_gen.start()
     log_gen.start()
@@ -78,7 +98,7 @@ def main():
 
     def shutdown(sig=None, frame=None):
         print("\n[main] Shutting down...")
-        scenario_engine.stop()
+        engine.stop()
         metrics_gen.stop()
         log_gen.stop()
         sys.exit(0)
@@ -102,20 +122,18 @@ def main():
         else:
             print("[main] Running in steady-state baseline mode. Ctrl+C to stop.")
         wait_until_deadline()
+
     elif args.mode == "scenario":
-        print(f"[main] Injecting scenario: {args.scenario} in 5s...")
-        for _ in range(5):
-            if timed_out():
-                shutdown()
-            time.sleep(1)
+        print(f"[main] Injecting scenario: {args.scenario}.")
+    
         if not timed_out():
-            scenario_engine.run_scenario(args.scenario, on_phase_change=on_phase)
+            engine.run_scenario(args.scenario, on_phase_change=on_phase)
         print("[main] Scenario complete. Continuing steady state.")
         wait_until_deadline()
     elif args.mode == "training":
         print("[main] Starting full training sequence...")
         if not timed_out():
-            scenario_engine.run_training_sequence(interval_between=30.0)
+            engine.run_training_sequence(interval_between=30.0)
         print("[main] Training sequence complete.")
         if timed_out():
             shutdown()
