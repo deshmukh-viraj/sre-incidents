@@ -1,14 +1,8 @@
 """
 tools/kg_tool.py
 ----------------
-Queries the Neo4j Knowledge Graph during incident diagnosis.
-Called by llm_diagnoser_node to get:
-  1. Service topology context (what does this service depend on?)
-  2. Public documentation summaries (what do the docs say about this?)
-  3. Known remediations (what fixed this before?)
-  4. Past incidents (has this happened before?)
-
-Returns a single formatted string injected into the LLM prompt.
+ask neo4j for graph info.
+we use this to figure out dependencies, docs, and what fixed stuff before.
 """
 
 import os
@@ -17,11 +11,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-NEO4J_URI      = os.getenv("NEO4J_URI",      "bolt://localhost:7687")
-NEO4J_USER     = os.getenv("NEO4J_USER",     "neo4j")
+NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "sreagentpassword")
 
-# Module-level driver — created once, reused on every call
+# module-level driver — created once, reused on every call
 _driver = None
 
 
@@ -51,20 +45,7 @@ def query_knowledge_graph(
     alert_name: Optional[str] = None,
 ) -> str:
     """
-    Main entry point called by llm_diagnoser_node.
-
-    Runs 4 queries against Neo4j and returns a formatted
-    context string ready for LLM injection.
-
-    Args:
-        affected_services: List of service names from detector
-                           Example: ["payment_gateway"]
-        alert_name:        The firing alert name
-                           Example: "PaymentGatewayP99LatencyHigh"
-
-    Returns:
-        Formatted string with all 4 context sections.
-        Returns fallback string if Neo4j is unavailable.
+    run a bunch of queries and smash them together into one big string for the llm.
     """
     driver = _get_driver()
 
@@ -77,8 +58,8 @@ def query_knowledge_graph(
         with driver.session() as session:
             for service in affected_services:
 
-                # ── Query 1: Downstream dependencies ──────────────────────
-                # "What does this service call? If they are slow, this breaks."
+                # query 1: downstream dependencies
+       
                 deps = _query_dependencies(session, service)
                 if deps:
                     dep_names = [d["dependency"] for d in deps]
@@ -87,7 +68,7 @@ def query_knowledge_graph(
                         f"If any of these are degraded, {service} will be impacted."
                     )
 
-                    # Attach doc summaries for each dependency
+                    #attach doc summaries for each dependency
                     for dep in deps:
                         if dep.get("doc_summary"):
                             context_sections.append(
@@ -99,8 +80,8 @@ def query_knowledge_graph(
                         f"— it is likely a root node (database or external API)."
                     )
 
-                # ── Query 2: Upstream services (who calls this service?) ───
-                # "If this service is slow, who else gets hurt?"
+                # qery 2: upstream services (who calls this service?)
+                # 
                 upstream = _query_upstream(session, service)
                 if upstream:
                     context_sections.append(
@@ -109,8 +90,8 @@ def query_knowledge_graph(
                         f"Degradation here cascades to all of them."
                     )
 
-                # ── Query 3: Known remediations for this service ───────────
-                # "What has fixed problems on this service before?"
+                #query 3: known remediations for this service 
+                
                 remediations = _query_remediations(session, service, alert_name)
                 if remediations:
                     rem_lines = []
@@ -124,10 +105,12 @@ def query_knowledge_graph(
                         f"[Known Fixes for {service}]:\n" + "\n".join(rem_lines)
                     )
 
-                # ── Query 4: Past incidents on this service ────────────────
-                # "Has this exact pattern occurred before? What fixed it?"
+                # query 4: past incidents on this service
+               
                 past = _query_past_incidents(session, service, alert_name)
-                if past:
+                if past is None:
+                    return "No past incidents found for this alert"
+                else:
                     context_sections.append(
                         f"[Past Incident] Similar incident on {service}: "
                         f"root_cause='{past['root_cause']}', "
@@ -145,19 +128,16 @@ def query_knowledge_graph(
     return "\n\n".join(context_sections)
 
 
-# ── Individual query functions ─────────────────────────────────────────────
+# Individual query functions 
 
 def _query_dependencies(session, service: str) -> list:
-    """
-    Find everything this service DEPENDS_ON.
-    Returns list of {dependency, doc_summary, doc_url} dicts.
-    """
+    """find what this service talks to"""
     result = session.run(
         """
         MATCH (s:Service {name: $service})-[:DEPENDS_ON]->(dep:Service)
-        RETURN dep.name        AS dependency,
+        RETURN dep.name  AS dependency,
                dep.doc_summary AS doc_summary,
-               dep.doc_url     AS doc_url
+               dep.doc_url AS doc_url
         """,
         service=service,
     )
@@ -165,10 +145,7 @@ def _query_dependencies(session, service: str) -> list:
 
 
 def _query_upstream(session, service: str) -> list:
-    """
-    Find everything that calls this service (reverse direction).
-    Returns list of service names.
-    """
+    """find who calls this service"""
     result = session.run(
         """
         MATCH (caller:Service)-[:DEPENDS_ON]->(s:Service {name: $service})
@@ -193,10 +170,10 @@ def _query_remediations(
         result = session.run(
             """
             MATCH (a:Alert {name: $alert_name})-[:RESOLVED_BY]->(r:Remediation)
-            RETURN r.action       AS action,
-                   r.tool         AS tool,
+            RETURN r.action AS action,
+                   r.tool AS tool,
                    r.success_rate AS success_rate,
-                   r.avg_mttr_s   AS avg_mttr_s
+                   r.avg_mttr_s AS avg_mttr_s
             ORDER BY r.success_rate DESC
             LIMIT 3
             """,
@@ -207,10 +184,10 @@ def _query_remediations(
             """
             MATCH (a:Alert)-[:AFFECTS]->(s:Service {name: $service})
             MATCH (a)-[:RESOLVED_BY]->(r:Remediation)
-            RETURN r.action       AS action,
-                   r.tool         AS tool,
+            RETURN r.action AS action,
+                   r.tool AS tool,
                    r.success_rate AS success_rate,
-                   r.avg_mttr_s   AS avg_mttr_s
+                   r.avg_mttr_s AS avg_mttr_s
             ORDER BY r.success_rate DESC
             LIMIT 3
             """,
@@ -233,11 +210,11 @@ def _query_past_incidents(
             """
             MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name})
             WHERE p.success = true
-            RETURN p.root_cause   AS root_cause,
+            RETURN p.root_cause AS root_cause,
                    p.action_taken AS action_taken,
                    p.mttr_seconds AS mttr_seconds,
-                   p.success      AS success,
-                   p.timestamp    AS timestamp
+                   p.success AS success,
+                   p.timestamp AS timestamp
             ORDER BY p.timestamp DESC
             LIMIT 1
             """,
@@ -249,10 +226,10 @@ def _query_past_incidents(
             MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert)
                   -[:AFFECTS]->(s:Service {name: $service})
             WHERE p.success = true
-            RETURN p.root_cause   AS root_cause,
+            RETURN p.root_cause AS root_cause,
                    p.action_taken AS action_taken,
                    p.mttr_seconds AS mttr_seconds,
-                   p.success      AS success
+                   p.success AS success
             ORDER BY p.timestamp DESC
             LIMIT 1
             """,
@@ -264,18 +241,15 @@ def _query_past_incidents(
 
 
 def append_past_incident(
-    incident_id:  str,
-    alert_name:   str,
-    root_cause:   str,
+    incident_id: str,
+    alert_name: str,
+    root_cause: str,
     action_taken: str,
     mttr_seconds: int,
-    success:      bool,
+    success: bool,
 ) -> None:
     """
-    Called by execute_node after every resolution.
-    Writes a PastIncident node so the system learns from this incident.
-
-    This is the learning loop — the KG gets smarter over time.
+    save what we did so we remember for next time.
     """
     driver = _get_driver()
     if driver is None:
@@ -287,12 +261,12 @@ def append_past_incident(
             session.run(
                 """
                 CREATE (p:PastIncident {
-                    incident_id:  $incident_id,
-                    root_cause:   $root_cause,
+                    incident_id: $incident_id,
+                    root_cause: $root_cause,
                     action_taken: $action_taken,
                     mttr_seconds: $mttr_seconds,
-                    success:      $success,
-                    timestamp:    datetime()
+                    success: $success,
+                    timestamp: datetime()
                 })
                 """,
                 incident_id=incident_id,
@@ -301,7 +275,7 @@ def append_past_incident(
                 mttr_seconds=mttr_seconds,
                 success=success,
             )
-            # Link to Alert node if it exists in KG
+            # link to Alert node if it exists in KG
             session.run(
                 """
                 MATCH (p:PastIncident {incident_id: $incident_id}),
