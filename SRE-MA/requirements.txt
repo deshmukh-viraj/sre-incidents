@@ -27,3 +27,4 @@ faiss-cpu
 neo4j
 beautifulsoup4
 langchain-groq
+prometheus_client
