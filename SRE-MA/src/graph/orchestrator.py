@@ -14,7 +14,8 @@ from src.agents.escalation_agent import escalate_node
 
 from src.graph.routing import (
     route_after_diagnosis,
-    route_after_remediator
+    route_after_remediator,
+    route_after_verification
 )
 
 load_dotenv()
@@ -26,7 +27,7 @@ CHECKPOINT_DB = str(DATA_DIR / "incident_state.db")
 
 def build_graph() -> StateGraph:
     """
-    construct the langgraph state machine
+    put the langgraph nodes together
     """
     graph = StateGraph(AgentState)
 
@@ -40,11 +41,12 @@ def build_graph() -> StateGraph:
     graph.add_node("execute", execute_node)
     graph.add_node("escalate", escalate_node)
 
+
     graph.set_entry_point("detector")
 
     # detector -> diagnoser (always proceed to diagnosis to identify root cause)
     graph.add_edge("detector", "diagnoser")
-    
+
     # diagnoser -> route based on confidence
     graph.add_conditional_edges(
         "diagnoser",
@@ -85,7 +87,15 @@ def build_graph() -> StateGraph:
     #human gate -> execute (graph resumes here after /approve call)
     graph.add_edge("human_gate", "execute")
 
-    graph.add_edge("execute", END)
+    graph.add_conditional_edges(
+        "execute",
+        route_after_verification,
+        {
+            "end_resolved": END,
+            "escalate_execution": "escalate"
+        }
+    )
+    
     graph.add_edge("escalate", END)
 
     return graph
@@ -93,18 +103,15 @@ def build_graph() -> StateGraph:
 
 def compile():
     f"""
-    compile the graph with sqlite checkpointing
-    the checkpointer enables:
-    -graph state persistance across process restarts
-    -HITL resumption via /incidents/{id}/approve
-    -reply and debugging of any incident 
+    compile graph with sqlite so we don't lose state if the server dies.
+    also lets us pause for human approval.
     """
     
     import sqlite3
     graph = build_graph()
     conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
-    app = graph.compile(checkpointer=checkpointer)
+    app = graph.compile(checkpointer=checkpointer, interrupt_before=["execute"])
 
     print(f"[orchestrator] Graph compiled. Checkpoint DB : {CHECKPOINT_DB}")
     return app
@@ -113,16 +120,17 @@ def compile():
 app = compile()
 
 #run full incident through the graph
-def run_incident(incident_id: str, raw_signals: dict) -> dict:
+def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> dict:
     """
-    convenience wrapper runs a complete incident through the graph
-    return the final AgentState
+    wrapper to just run the whole incident through the graph.
+    returns final state.
     """
 
     from src.graph.state import initial_state
 
     state = initial_state(incident_id, raw_signals)
-    config = {"configurable": {"thread_id": incident_id}}
+    if config is None:
+        config = {"configurable": {"thread_id": incident_id}}
 
     print(f"\n{'='*60}")
     print(f"INCIDENT: {incident_id}")
@@ -136,6 +144,10 @@ def run_incident(incident_id: str, raw_signals: dict) -> dict:
     print(f"Status: {result.get('resolution_status')}")
     print(f"MTTR: {result.get('mttr_seconds')}s")
     print(f"Root cause: {result.get('root_cause', 'escalated')}")
+    print(f"Diagnosis Summary: {result.get('diagnosis_summary')}")
+    print(f"Evidence Summary: {result.get('evidence_summary')}")
+    print(f"Blast Analysis: {result.get('blast_analysis')}")
+    print(f"Suggested Remediation: {result.get('llm_suggested_action')}")
     print(f"Tokens: {result.get('total_tokens_used')} (${result.get('token_cost_usd', 0):.4f})")
     print(f"{'='*60}\n")
 
