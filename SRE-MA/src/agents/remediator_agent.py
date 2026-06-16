@@ -20,9 +20,8 @@ from src.graph.routing import classify_blast_radius, requires_human_approval
 
 def remediator_node(state: AgentState) -> dict:
     """
-    builds action plan from the diagnosed root caise.
-    maps runbooks -> action item with blast radious and approval flags
-    used llm only if runbook does not cover the diagnosed root cause
+    make the action plan.
+    if runbook matches, use it. otherwise ask llm for help.
     """
     print(f"\n[remediator] Building action plan for {state['incident_id']}")
 
@@ -84,8 +83,7 @@ def remediator_node(state: AgentState) -> dict:
 
 def _build_action_plan(runbook_id: str, state: AgentState) -> list:
     """
-    deterministic action plan builder per runbook
-    return list of actionitem dicts
+    hardcoded plans for known runbooks.
     """
     service = state.get("affected_services", ["unknown"])[0]
     raw = state.get("raw_signals", {})
