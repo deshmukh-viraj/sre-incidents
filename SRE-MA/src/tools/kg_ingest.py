@@ -1,18 +1,11 @@
 """
-populates the Neo4j knowledge graph with:
-  1. service topology (nodes + DEPENDS_ON relationships)
-  2. alert nodes (which alerts belong to which service)
-  3. public documentation content (scraped at ingest time)
-  4. known remediations per alert (seeded from your 6 runbooks)
+populates the neo4j knowledge graph with:
+  1. service topology
+  2. alerts mapping
+  3. public docs
+  4. known remediations
 
-run once at setup:
-    python -m tools.kg_ingest
-
-re-run when:
-  - you add a new service to the topology
-  - you add a new runbook
-  - you want to refresh public doc content
-
+run once at setup or when adding new stuff.
 """
 
 import os
@@ -259,13 +252,13 @@ class KGIngestor:
             self._create_alerts(session)
             self._create_remediations(session)
             self._link_alerts_to_remediations(session)
+            self._seed_past_incidents(session)
 
         print("\n KG ingestion complete.\n")
 
     def _clear_static_nodes(self, session):
         """
-        clear Service, alert, remediation nodes on each run.
-        DO NOT clear PastIncident nodes — those are the learned history.
+        clear out the old stuff before recreating, but don't delete past incidents.
         """
         session.run("MATCH (n:Service) DETACH DELETE n")
         session.run("MATCH (n:Alert) DETACH DELETE n")
@@ -365,6 +358,40 @@ class KGIngestor:
         )
         print("  Alert -> Remediation links created")
 
+    
+    def _seed_past_incidents(self, session):
+        print("\n[past_incidents] seeding historial incident data...")
+        incidents = [
+            {
+                "incident_id": "INC-HIST-001",
+                "alert_name": "ServiceBehaviourAnomaly",
+                "root_cause": "External payment processor API latency",
+                "action_taken": "enable rate_limiting",
+                "success": True,
+                "mttr_seconds": 120
+            },
+            {
+                "incident_id": "INC-HIST-002",
+                "alert_name": "PaymentGatewayP99LatencyHigh",
+                "root_cause": "Downstrean card_rails API throttling requests.",
+                "action_taken": "set_feature_flag",
+                "success": True,
+                "mttr_seconds": 90
+            }
+        ]
+        for inc in incidents:
+            session.run("""
+            MERGE (a:Alert {name: $alert_name})
+            MERGE (p:PastIncident {incident_id: $incident_id})
+            SET p.root_cause = $root_cause,
+                p.action_taken = $action_taken,
+                p.success = $success,
+                p.mttr_seconds = $mttr_seconds,
+                p.timestamp = datetime()
+            MERGE (p)-[:TRIGGERED_BY] -> (a)
+        """, **inc)
+        print(f" seedded {inc['incident_id']} -> {inc['alert_name']}")
+
 
 def append_past_incident(
     incident_id: str,
@@ -375,16 +402,15 @@ def append_past_incident(
     success: bool,
 ):
     """
-    called by execute_node after each resolution.
-    appends a PastIncident node to the KG so the system learns over time.
-
-    this is the learning loop  every incident makes the KG smarter.
+    called by execute_node after fixing an incident.
+    adds it to the graph so we know for next time.
     """
     driver = GraphDatabase.driver(
         NEO4J_URI,
         auth=(NEO4J_USER, NEO4J_PASSWORD),
     )
     try:
+      
         with driver.session() as session:
             #create PastIncident node
             session.run(
@@ -407,18 +433,20 @@ def append_past_incident(
             #link to the Alert node if it exists
             session.run(
                 """
-                MATCH (p:PastIncident {incident_id: $incident_id}),
+                MERGE (p:PastIncident {incident_id: $incident_id}),
                       (a:Alert {name: $alert_name})
-                CREATE (p)-[:TRIGGERED_BY]->(a)
+                MERGE (p)-[:TRIGGERED_BY]->(a)
                 """,
                 incident_id=incident_id,
                 alert_name=alert_name,
             )
             print(f"[kg_ingest] Appended PastIncident {incident_id} to KG")
     except Exception as e:
-        print(f"[kg_ingest] Failed to append incident: {e}")
-    finally:
-        driver.close()
+        print(f"critical ingestion failure: {e}")
+        raise
+    #     print(f"[kg_ingest] Failed to append incident: {e}")
+    # finally:
+    #     driver.close()
 
 
 if __name__ == "__main__":
