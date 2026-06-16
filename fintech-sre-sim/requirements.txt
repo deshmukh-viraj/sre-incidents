@@ -13,3 +13,5 @@ faiss-cpu
 sentence-transformers
 huggingface
 neo4j
+uvicorn
+fastapi

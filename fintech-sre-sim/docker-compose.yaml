@@ -61,6 +61,8 @@ services:
       - "9093:9093"
     volumes:
       - ./config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - sim-net
     restart: unless-stopped
@@ -156,27 +158,27 @@ services:
     restart: unless-stopped
 
 
-  # Webhook receiver — simulates PagerDuty/Slack for alert routing
-  webhook-sink:
-    image: python:3.11-slim
-    command: >
-      python -c "
-      from http.server import HTTPServer, BaseHTTPRequestHandler
-      import json, datetime
-      class H(BaseHTTPRequestHandler):
-        def do_POST(self):
-          n = int(self.headers.get('Content-Length', 0))
-          body = json.loads(self.rfile.read(n))
-          print(f'[{datetime.datetime.now().isoformat()}] ALERT: {json.dumps(body, indent=2)}')
-          self.send_response(200); self.end_headers()
-        def log_message(self, *a): pass
-      HTTPServer(('0.0.0.0', 9095), H).serve_forever()
-      "
-    ports:
-      - "9095:9095"
-    networks:
-      - sim-net
-    restart: unless-stopped
+  # # Webhook receiver — simulates PagerDuty/Slack for alert routing
+  # webhook-sink:
+  #   image: python:3.11-slim
+  #   command: >
+  #     python -c "
+  #     from http.server import HTTPServer, BaseHTTPRequestHandler
+  #     import json, datetime
+  #     class H(BaseHTTPRequestHandler):
+  #       def do_POST(self):
+  #         n = int(self.headers.get('Content-Length', 0))
+  #         body = json.loads(self.rfile.read(n))
+  #         print(f'[{datetime.datetime.now().isoformat()}] ALERT: {json.dumps(body, indent=2)}')
+  #         self.send_response(200); self.end_headers()
+  #       def log_message(self, *a): pass
+  #     HTTPServer(('0.0.0.0', 9095), H).serve_forever()
+  #     "
+  #   ports:
+  #     - "9095:9095"
+  #   networks:
+  #     - sim-net
+  #   restart: unless-stopped
 
   neo4j:
     image: neo4j:latest
