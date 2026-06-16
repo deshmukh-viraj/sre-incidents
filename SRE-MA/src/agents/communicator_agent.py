@@ -28,8 +28,8 @@ load_dotenv()
 
 def communicator_node(state: AgentState) -> dict:
     """
-    generates three incident communications simultaneously using the LLM.
-    runs in parallel with the diagnoser; does not wait for root cause.
+    write updates for the status page, slack, and pagerduty all at once.
+    runs parallel to the diagnoser so we don't waste time waiting.
     """
     print(f"\n[communicator] Generating communications for {state['incident_id']}")
 
@@ -80,8 +80,8 @@ Return this exact JSON structure:
             "status_page_update": parsed.get("status_page_update"),
             "war_room_summary": parsed.get("war_room_summary"),
             "escalation_message": parsed.get("escalation_message") if severity in ("SEV1", "SEV2") else None,
-            "total_token_used": state.get("total_tokens_used", 0) + new_tokens,
-            "total_cost_used": state.get("token_cost_usd", 0.0) + cost,
+            "total_tokens_used": state.get("total_tokens_used", 0) + new_tokens,
+            "token_cost_usd": state.get("token_cost_usd", 0.0) + cost,
         }
 
     except Exception as e:
