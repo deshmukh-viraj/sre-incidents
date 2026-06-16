@@ -36,9 +36,9 @@ load_dotenv()
 
 def diagnoser_node(state: AgentState) -> dict:
     """
-    Attempts deterministic diagnosis from numeric signals.
-    If a confident pattern is found → returns high-confidence hypothesis, skips LLM.
-    If no pattern matches → returns empty hypotheses so the graph routes to llm_diagnoser.
+    try hardcoded checks first using just numbers.
+    if we find something obvious, return high confidence and skip the llm.
+    otherwise, return empty so it goes to llm.
     """
     print(f"\n[diagnoser] Deterministic diagnosis attempt for {state['incident_id']}")
 
@@ -47,19 +47,29 @@ def diagnoser_node(state: AgentState) -> dict:
         confidence = result.get("confidence", 0)
         print(f"[diagnoser] Pattern matched: {result['hypothesis'][:60]} (confidence={confidence:.2f})")
 
+        evidence_list = [e for e in result.get("evidence", []) if e]
+        evidence_str = "\n".join([f" - {e}" for e in evidence_list]) if evidence_list else "Rule matched on metrics threshold"
+
         hypothesis = {
             "hypothesis": result['hypothesis'],
-            "evidence": [e for e in result.get("evidence",[]) if e],
+            "evidence": evidence_list,
+            "evidence_str": evidence_str,
             "confidence": confidence,
             "alternative": result.get("alternative"),
             "supporting_runbook": result.get("supporting_runbook")
-            
         }
+        
+        affected_services = state.get("affected_services", [])
+        affected_service = affected_services[0] if affected_services else "unknown_service"
+
         return {
             "hypotheses": [hypothesis],
             "root_cause": result["hypothesis"] if confidence >= DIAGNOSIS_CONFIDENCE else None,
             "diagnosis_mode": "deterministic",
             "diagnosis_loops": state.get("diagnosis_loops", 0) + 1,
+            "diagnosis_summary": f"Deterministic pattern matched: {result['hypothesis']}",
+            "evidence_summary": evidence_str,
+            "blast_analysis": f"Action targets {affected_service} with potential service disruption."
         }
 
     
@@ -75,14 +85,14 @@ def diagnoser_node(state: AgentState) -> dict:
 # Node 2: LLM diagnoser
 def llm_diagnoser(state: AgentState) -> dict:
     """
-    llm powered diagnoser for ambigous incidencts
-    uses 3 context sources:
-    -FAISS runbooks chunks
-    -Neo4j KG
-    -prometheus singlas and loki log summaries
+    ask the llm if we don't know what's going on.
+    we give it:
+    - some runbook text
+    - neo4j graph stuff
+    - prometheus metrics + loki logs
 
-    llm extract both root cause and suggested remediation.
-    only called when deterministic diagnosis confidence < 0.70
+    llm should figure out root cause and what to do next.
+    only call this if our hardcoded checks aren't sure.
     """
     print(f"\n[llm_diagnoser] LLM diagnosis for {state['incident_id']}")
 
@@ -97,10 +107,10 @@ def llm_diagnoser(state: AgentState) -> dict:
     rb_result = lookup_runbook(query=f"{alert} {' '.join(services)}", runbook_id=runbook, k=3)
     book_context = rb_result.get("context", "No runbook context found.")
 
-    # Context: Neo4j KG
+    # context: Neo4j KG
     kg_context = query_knowledge_graph(affected_services=services, alert_name=alert)
 
-    # Signal summary (exclude log summaries / patterns)
+    # signal summary (exclude log summaries / patterns)
     signals_str = (
         "\n".join(
             f"  {k}: {v}"
@@ -208,8 +218,8 @@ Diagnose this incident. Return JSON ONLY.
             "diagnosis_mode": "llm",
             "diagnosis_loops": state.get("diagnosis_loops", 0) + 1,
             "model_used": os.getenv("LLM_MODEL", "llama3-70b-8192"),
-            "total_token_used": state.get("total_tokens_used", 0) + new_tokens,
-            "total_token_cost": state.get("token_cost_usd", 0.0) + cost,
+            "total_tokens_used": state.get("total_tokens_used", 0) + new_tokens,
+            "token_cost_usd": state.get("token_cost_usd", 0.0) + cost,
         }
 
     except Exception as e:
