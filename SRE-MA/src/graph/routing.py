@@ -277,7 +277,7 @@ def route_after_diagnosis(
     after diagnosis attempt:
     - high confidence deterministic -> remediator (skip LLM)
     - low confidence OR no pattern -> llm_diagnoser
-    - LLM already tried and still low confidence -> escalate
+    - llm already tried and still low confidence -> escalate
     """
     hypotheses = state.get("hypotheses", [])
     diagnosis_mode = state.get("diagnosis_mode")
@@ -302,31 +302,40 @@ def route_after_diagnosis(
         # LLM already tried and still not confident -> give up
         return "escalate"
 
-    # Haven't tried LLM yet -< try it now
+    # haven't tried the llm yet -> give it a shot
     return "llm_diagnoser"
 
 
 #Check if approval is needed
-
 def route_after_remediator(
     state: AgentState,
 ) -> Literal["human_gate", "execute"]:
     """
-    if action plan contains any destructive/irreversible action -> human gate.
-    safe/reversible actions -> auto-execute.
+    human ke pass jana, otherwise execute immediately.
     """
-    if state.get("requires_approval") and not state.get("human_approved"):
+    if state.get("requires_approval"):
         return "human_gate"
     return "execute"
 
 
+def route_after_verification(state: AgentState) -> Literal["end_resolved", "escalate_execution"]:
+    """after the executor runs a runbook and we poll metrics:
+    - metrics recivered -> end (success)
+    - metrics still breaching -> escalate (remediation failed)
+    """
+    if state.get("verified"):
+        return "end_resolved"
+    else:
+        return "escalate_execution"
+
+        
 #Blast radius classifier
 def classify_blast_radius(action: dict) -> str:
     """
-    classify an actions blast radius.
-    pod    -> auto-approve (single pod restart)
-    service -> warn (affects a whole service)
-    cluster -> always human gate (affects everything)
+    figure out how bad this action is.
+    pod -> auto-approve usually (just restarting a pod)
+    service -> warn (might impact some users)
+    cluster -> always ask human (could break everything)
     """
     tool = action.get("tool", "")
     params = action.get("params", {})
@@ -350,10 +359,10 @@ def classify_blast_radius(action: dict) -> str:
 
 def requires_human_approval(action: dict) -> bool:
     """
-    deterministic approval rule.
-    blast_radius=cluster -> always
-    reversible=False -> always
-    blast_radius=service -> yes (unless explicitly auto approved)
+    hardcoded rule to decide if we need a human.
+    blast_radius=cluster -> yes
+    reversible=False -> yes
+    blast_radius=service -> yes (unless we say otherwise)
     """
     blast = classify_blast_radius(action)
     reversible = action.get("reversible", True)
