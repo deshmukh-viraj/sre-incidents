@@ -17,7 +17,7 @@ from src.graph.routing import classify_severity
 from src.tools.sre_tool import collect_all_signals
 
 
-# Node 1: Detector
+# Node 1: detector
 
 def detector_node(state: AgentState) -> dict:
     """
@@ -54,20 +54,20 @@ def detector_node(state: AgentState) -> dict:
 def _infer_service(alert_name: str) -> str:
     """guess the service based on alert name keywords"""
     mapping = {
-        "PaymentGateway":   "payment_gateway",
-        "SLOError":         "payment_gateway",
-        "SLOBudget":        "payment_gateway",
-        "PaymentDecline":   "payment_gateway",
+        "PaymentGateway": "payment_gateway",
+        "SLOError": "payment_gateway",
+        "SLOBudget": "payment_gateway",
+        "PaymentDecline":"payment_gateway",
         "PaymentTransaction": "payment_gateway",
-        "CircuitBreaker":   "payment_gateway",
-        "DBConnection":     "account_ledger",
-        "SlowQQuery":       "account_ledger",
-        "Ledger":           "account_ledger",
-        "ServiceMemory":    "account_ledger",
-        "Anomalous":        "api_gateway",
-        "Authentication":   "api_gateway",
-        "Compliance":       "api_gateway",
-        "FraudModel":       "fraud_detector",
+        "CircuitBreaker": "payment_gateway",
+        "DBConnection": "account_ledger",
+        "SlowQQuery": "account_ledger",
+        "Ledger": "account_ledger",
+        "ServiceMemory": "account_ledger",
+        "Anomalous": "api_gateway",
+        "Authentication": "api_gateway",
+        "Compliance": "api_gateway",
+        "FraudModel": "fraud_detector",
     }
     for keyword, svc in mapping.items():
         if keyword.lower() in alert_name.lower():
