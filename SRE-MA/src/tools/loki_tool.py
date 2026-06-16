@@ -1,9 +1,8 @@
 """
 tools/loki_tool.py
 ------------------
-Queries Loki for structured JSON logs using LogQL.
-Agents call these functions to get log evidence during diagnosis.
-All LogQL is encapsulated here — no raw queries in agent files.
+ask loki for logs.
+keep all the logql stuff here so agents don't have to deal with it.
 """
 
 import os
@@ -18,7 +17,7 @@ load_dotenv()
 LOKI_URL = os.getenv("LOKI_URL", "http://localhost:3100")
 
 
-# ── Low-level Loki query ───────────────────────────────────────────────────
+#low-level Loki query
 
 def _query_loki(logql: str, limit: int = 50, lookback_minutes: int = 10) -> List[Dict]:
     """
@@ -58,12 +57,11 @@ def _query_loki(logql: str, limit: int = 50, lookback_minutes: int = 10) -> List
         return []
 
 
-# ── Named log queries ──────────────────────────────────────────────────────
+#named log queries
 
 def get_error_logs(service: str, limit: int = 20, lookback_minutes: int = 10) -> List[Dict]:
     """
-    Fetch recent ERROR-level logs for a service.
-    Used by diagnoser to identify error messages and stack traces.
+    grab recent error logs for a service so we can see what blew up.
     """
     return _query_loki(
         f'{{service="{service}"}} | json | level="ERROR"',
@@ -132,13 +130,11 @@ def get_compliance_logs(regulation: str = "PCI-DSS", lookback_minutes: int = 60)
     )
 
 
-# ── Log analysis helpers ───────────────────────────────────────────────────
+#log analysis helpers
 
 def extract_log_summary(logs: List[Dict], max_records: int = 10) -> List[str]:
     """
-    Convert raw log records to short strings for LLM context.
-    Strips verbose fields to keep token count low.
-    Returns max_records most relevant snippets.
+    turn ugly logs into short strings so we don't blow up the llm token limit.
     """
     summaries = []
     for log in logs[:max_records]:
@@ -153,18 +149,18 @@ def extract_log_summary(logs: List[Dict], max_records: int = 10) -> List[str]:
         if "message" in log:
             parts.append(log["message"][:120])
 
-        # Include error detail if present
+        # include error detail if present
         if "error" in log and isinstance(log["error"], dict):
             err = log["error"]
             if "message" in err:
                 parts.append(f"error={err['message'][:100]}")
 
-        # Include security event type if present
+        # include security event type if present
         if "security_event" in log and isinstance(log["security_event"], dict):
             evt = log["security_event"]
             parts.append(f"security_event={evt.get('event_type', '')} ip={evt.get('source_ip', '')}")
 
-        # Include DB info if present
+        # include DB info if present
         if "db" in log and isinstance(log["db"], dict):
             db = log["db"]
             parts.append(f"db={db.get('name', '')} op={db.get('operation', '')} duration={db.get('duration_ms', '')}ms")
@@ -176,18 +172,17 @@ def extract_log_summary(logs: List[Dict], max_records: int = 10) -> List[str]:
 
 def detect_patterns(logs: List[Dict]) -> Dict[str, Any]:
     """
-    Scan logs for known patterns that map to specific runbooks.
-    Returns a dict of detected signals — used by the deterministic routing layer.
+    look for specific keywords in logs to guess what went wrong.
     """
     patterns = {
-        "hikaripoolerror":       False,
-        "circuit_breaker_open":  False,
-        "card_rails_timeout":    False,
-        "bulk_data_export":      False,
-        "auth_failures":         0,
-        "slow_queries":          0,
-        "http_500_count":        0,
-        "http_429_count":        0,
+        "hikaripoolerror": False,
+        "circuit_breaker_open": False,
+        "card_rails_timeout": False,
+        "bulk_data_export": False,
+        "auth_failures": 0,
+        "slow_queries": 0,
+        "http_500_count": 0,
+        "http_429_count": 0,
     }
 
     for log in logs:
