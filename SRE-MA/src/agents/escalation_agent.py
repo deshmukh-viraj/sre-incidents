@@ -28,7 +28,7 @@ def escalate_node(state: AgentState) -> dict:
     print(f"\n[escalate] Escalating {state['incident_id']} — diagnosis confidence too low")
 
     incident_id = state['incident_id']
-    severity = state.get['severity', 'unknown']
+    severity = state.get('severity', 'unknown')
     alert_name = state.get('alert_name', 'unknown')
 
     #determine the reason for escalation
