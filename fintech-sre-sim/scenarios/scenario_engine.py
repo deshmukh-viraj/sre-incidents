@@ -105,7 +105,7 @@ SCENARIO_CIRCUIT_BREAKER_TRIP = Scenario(
         ),
         ScenarioPhase(
             name="circuit_breaker_opens",
-            duration_seconds=180,
+            duration_seconds=-1,
             circuit_breaker_open={"payment_gateway": True, "account_ledger": True},
             error_rate_override={
                 "payment_gateway": 0.95,
@@ -146,19 +146,19 @@ SCENARIO_DATA_EXFILTRATION = Scenario(
     phases=[
         ScenarioPhase(
             name="credential_stuffing",
-            duration_seconds=60,
+            duration_seconds=-1,
             rps_multiplier={"api_gateway": 4.5},
             error_rate_override={"api_gateway": 0.08},  # 8% auth failures
         ),
         ScenarioPhase(
             name="bulk_export_active",
-            duration_seconds=120,
+            duration_seconds=-1,
             rps_multiplier={"api_gateway": 12.0, "account_ledger": 8.0},
             error_rate_override={"api_gateway": 0.02},  # attacker is authenticated
         ),
         ScenarioPhase(
             name="rate_limit_kicks_in",
-            duration_seconds=60,
+            duration_seconds=-1,
             rps_multiplier={"api_gateway": 1.2},
             error_rate_override={"api_gateway": 0.45},  # 429s flooding
         ),
@@ -186,13 +186,13 @@ SCENARIO_DB_CONNECTION_EXHAUSTION = Scenario(
     phases=[
         ScenarioPhase(
             name="leak_growing",
-            duration_seconds=180,
+            duration_seconds=-1,
             db_pool_saturation={"postgres_primary": 0.70},
             latency_multiplier={"account_ledger": 2.5},
         ),
         ScenarioPhase(
             name="pool_near_exhaustion",
-            duration_seconds=250,
+            duration_seconds=-1,
             db_pool_saturation={"postgres_primary": 0.92},
             latency_multiplier={"account_ledger": 8.0},
             error_rate_override={"account_ledger": 0.15},
