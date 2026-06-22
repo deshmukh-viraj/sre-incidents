@@ -18,7 +18,10 @@ from src.graph.routing import (
     route_after_verification
 )
 
+from src.observability.langfuse_logger import get_langfuse_handler, get_trace_id, log_incident_run
+from langfuse import observe, Langfuse
 load_dotenv()
+
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -104,14 +107,13 @@ def build_graph() -> StateGraph:
 def compile():
     f"""
     compile graph with sqlite so we don't lose state if the server dies.
-    also lets us pause for human approval.
     """
     
     import sqlite3
     graph = build_graph()
     conn = sqlite3.connect(CHECKPOINT_DB, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
-    app = graph.compile(checkpointer=checkpointer, interrupt_before=["execute"])
+    app = graph.compile(checkpointer=checkpointer)
 
     print(f"[orchestrator] Graph compiled. Checkpoint DB : {CHECKPOINT_DB}")
     return app
@@ -120,6 +122,7 @@ def compile():
 app = compile()
 
 #run full incident through the graph
+@observe(name="sre-incident-orchestrator")
 def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> dict:
     """
     wrapper to just run the whole incident through the graph.
@@ -129,8 +132,14 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     from src.graph.state import initial_state
 
     state = initial_state(incident_id, raw_signals)
-    if config is None:
-        config = {"configurable": {"thread_id": incident_id}}
+    # get the langfuse handler
+    handler = get_langfuse_handler(
+        session_id=incident_id,
+        alert_name=raw_signals.get("alert_name", "unknown"),
+        scenario_name=raw_signals.get("scenario_name", "unknown")
+    )
+   
+    config = {"configurable": {"thread_id": incident_id}, "callbacks": [handler]}
 
     print(f"\n{'='*60}")
     print(f"INCIDENT: {incident_id}")
@@ -138,7 +147,27 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     print(f"{'='*60}")
 
     result = app.invoke(state, config=config)
+    client = Langfuse()
+    trace_id = client.get_current_trace_id()
 
+    # attach SRE metadata to the current span (v4.x API)
+    scenario_name = raw_signals.get("scenario_name")
+    tags = ["sre-agent", raw_signals.get("alert_name", "unknown")]
+    if scenario_name:
+        tags.append(f"scenario:{scenario_name}")
+
+    client.update_current_span(
+        metadata={
+            "session_id": incident_id,
+            "tags": tags,
+        }
+    )
+
+    log_incident_run(result, trace_id=trace_id, scenario_name=scenario_name or "unknown")
+
+    trace_url = client.get_trace_url()
+    print(f"[Lanfusr] View trace in brower:{trace_url}")
+    
     print(f"\n{'='*60}")
     print(f"RESOLVED: {incident_id}")
     print(f"Status: {result.get('resolution_status')}")
