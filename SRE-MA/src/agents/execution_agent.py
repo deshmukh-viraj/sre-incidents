@@ -16,6 +16,7 @@ import os
 import datetime
 import time
 
+from langgraph.types import interrupt
 from src.graph.state import AgentState, ResolutionStatus
 from src.tools.sre_tool import execute_remediation, notify_slack
 from src.tools.kg_tool import append_past_incident
@@ -25,16 +26,25 @@ from src.tools.kg_tool import append_past_incident
 
 def human_gate_node(state: AgentState) -> dict:
     """
-    save the action plan and chill until human says yes.
+    check if action requires human approval
+    if yes, pauses the graph (interrupt). if no, passes through
     """
     incident_id = state['incident_id']
-    print(f"\n[human_gate] Waiting for approval on {incident_id}")
-    print("[human_gate] Actions requiring approval:")
+    
+    #check if any action in the plan requires approval
+    needs_approval = any(a.get("requires_approval", False) for a in state.get("action_plan", []))
+
+    # deterministic human approval 
+    if not needs_approval or os.getenv("SIM_AUTO_APPROVE", "false").lower() == "true":
+        print(f"\n[human_gate] Auto approved for {incident_id} (requires_approval={needs_approval})")
+        return {"human_approved": True, "approval_timeout": False}
+
+    # llm /destructive (requires approval)
+    print(f"[human_gate] Interrupting graph for {incident_id} awaiting for human approval...")
 
     actions_text = ""
     for a in state.get("action_plan", []):
         if a.get("requires_approval"):
-            print(f"  pending: {a['action'][:60]}")
             actions_text += f"- {a['action']}\n"
 
     # Send a detailed Slack message to ask for approval
@@ -47,19 +57,17 @@ def human_gate_node(state: AgentState) -> dict:
     )
     notify_slack(message=message, channel="incidents", severity="warning", incident_id=incident_id)
 
-    timeout = int(os.getenv("APPROVAL_TIMEOUT_SECONDS", "30"))
-
-    if os.getenv("SIM_AUTO_APPROVE", "false").lower() == "true":
-        print(f"[human_gate] SIM_AUTO_APPROVE=true -> auto-approving in {min(timeout, 5)}s")
-        time.sleep(min(timeout, 5))
-        return {"human_approved": True, "approval_timeout": False}
-
+    human_decsion = interrupt({
+        "question": "Do you approve the action plan?",
+        "incident_id": incident_id
+    })
+    print(f"[human gate] Resumed {incident_id} with human input: {human_decsion}")
     return {
-        "human_approved": False, 
-        "approval_timeout": False,
-        "resolution_status": ResolutionStatus.WAITING_FOR_APPROVAL.value
-    }
+        "human_approved": human_decsion.get("approved", False), 
+        "approved_by": human_decsion.get("approver", "system"),
+        "approval_timeout": False
 
+    }
 
 def _verify_recovery(service: str, metric_name: str = "p99_latency_s",
                      threshold: float = 5.0, timeout: int = 15, polls: int = 3) -> bool:
@@ -146,6 +154,7 @@ def execute_node(state: AgentState) -> dict:
     return {
         "action_plan": updated_plan,
         "resolution_status": status,
+        "verified": verified,
         "resolved_at": datetime.datetime.utcnow().isoformat(),
         "mttr_seconds":  mttr,
         "resolution_notes":  f"{len(action_plan)} action(s) executed. MTTR: {mttr}s. Verified: {verified}",
