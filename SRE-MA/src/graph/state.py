@@ -54,7 +54,7 @@ class AgentState(TypedDict):
     #raw input signals 
     raw_signals:  Dict[str, Any]  #alert labels + metric
     alert_name:  Optional[str]
-    runbook_id: Optional[str] # e.g. "RB-001" from alert labels
+    runbook_id: Optional[str] 
     team:  Optional[str]
 
     #detector outputs
@@ -83,9 +83,10 @@ class AgentState(TypedDict):
     escalation_message: Optional[str]   
 
     #resolution tracking
-    resolution_status: str             # ResolutionStatus enum value
+    resolution_status: str             # resolutionStatus enum value
     resolution_notes:Optional[str]
     mttr_seconds:Optional[int]
+    verified: bool                     # true if post execution metric check passed
 
     #LLM cost tracking
     llm_suggested_action: Optional[str]
@@ -138,6 +139,7 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         resolution_status=ResolutionStatus.OPEN.value,
         resolution_notes=None,
         mttr_seconds=None,
+        verified=False,
 
         llm_suggested_action=None,
         total_tokens_used=0,
