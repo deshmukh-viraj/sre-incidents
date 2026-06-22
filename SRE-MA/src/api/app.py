@@ -347,7 +347,7 @@ notes: str = ""):
         config = {
             "configurable": {"thread_id": incident_id}
         }
-        agent_graph.update_state(config, {"human_approved": True,"approval_timeout": False})
+        agent_graph.update_state(config, values={"human_approved": True}, as_node="human_gate")
 
         _incidents[incident_id]["approved_by"] = approver
         _incidents[incident_id]["approved_at"] = datetime.utcnow().isoformat()
