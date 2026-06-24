@@ -19,6 +19,7 @@ Writes to state:
 
 import os
 import json
+import re
 
 from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -32,7 +33,7 @@ from src.agents.utils import _get_llm
 load_dotenv()
 
 
-# Node 1: Deterministic Diagnoser
+# node 1: deterministic diagnoser
 
 def diagnoser_node(state: AgentState) -> dict:
     """
@@ -82,7 +83,7 @@ def diagnoser_node(state: AgentState) -> dict:
 
 
 
-# Node 2: LLM diagnoser
+# nnode 2: llm diagnoser
 def llm_diagnoser(state: AgentState) -> dict:
     """
     ask the llm if we don't know what's going on.
@@ -120,7 +121,7 @@ def llm_diagnoser(state: AgentState) -> dict:
         or "No signals available"
     )
 
-    # Log summaries
+    # log summaries
     error_logs = "\n".join(raw.get("error_log_summaries", [])[:6]) or "None"
 
     system_prompt = f"""You are an expert SRE diagnosing a production incident.
@@ -183,13 +184,11 @@ Diagnose this incident. Return JSON ONLY.
         resp = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
         raw_json = resp.content.strip()
 
-        # strip markdown fences if llm wraps anyway
-        if raw_json.startswith("```"):
-            raw_json = raw_json.split("```")[1]
-            if raw_json.startswith("json"):
-                raw_json = raw_json[4:]
-
-        parsed = json.loads(raw_json)
+        # extract the outermost JSON object regardless of markdown fences or surrounding text
+        m = re.search(r'\{.*\}', raw_json, re.DOTALL)
+        if not m:
+            raise ValueError(f"No JSON object found in LLM response ({len(raw_json)} chars)")
+        parsed = json.loads(m.group())
         hypotheses = parsed.get("hypotheses", [])
         root_cause = parsed.get("root_cause")
         llm_action = parsed.get("suggested_remediation_from_context")
@@ -197,7 +196,7 @@ Diagnose this incident. Return JSON ONLY.
         evidence_summary = parsed.get("evidence_summary")
         blast_analysis = parsed.get("blast_analysis")
 
-        # Token tracking
+        # token tracking
         usage = resp.response_metadata.get("token_usage", {})
         new_tokens = usage.get("total_tokens", 0)
         cost = new_tokens * 0.000015
