@@ -116,7 +116,7 @@ def execute_remediation(
 
     try:
         result = _run_action(tool, params)
-        response = httpx.post("http://localhost:8001/control/resolve", timeout=5.0)
+        response = httpx.post("http://127.0.0.1:8001/control/resolve", timeout=5.0)
         if response.status_code == 200:
             return {
                 "success": True,
