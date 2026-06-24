@@ -168,10 +168,25 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     trace_url = client.get_trace_url()
     print(f"[Lanfusr] View trace in brower:{trace_url}")
     
+    # compute mttr use state value, or calculate from timestamps
+    mttr = result.get('mttr_seconds')
+    if mttr is None:
+        started = result.get('started_at')
+        resolved = result.get('resolved_at')
+        if started and resolved:
+            import datetime
+            try:
+                t0 = datetime.datetime.fromisoformat(started)
+                t1 = datetime.datetime.fromisoformat(resolved)
+                mttr = int((t1 - t0).total_seconds())
+            except (ValueError, TypeError):
+                pass
+    mttr_display = f"{mttr}s" if mttr is not None else "N/A"
+
     print(f"\n{'='*60}")
     print(f"RESOLVED: {incident_id}")
     print(f"Status: {result.get('resolution_status')}")
-    print(f"MTTR: {result.get('mttr_seconds')}s")
+    print(f"MTTR: {mttr_display}")
     print(f"Root cause: {result.get('root_cause', 'escalated')}")
     print(f"Diagnosis Summary: {result.get('diagnosis_summary')}")
     print(f"Evidence Summary: {result.get('evidence_summary')}")
