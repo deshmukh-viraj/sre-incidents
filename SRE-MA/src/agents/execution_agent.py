@@ -22,7 +22,7 @@ from src.tools.sre_tool import execute_remediation, notify_slack
 from src.tools.kg_tool import append_past_incident
 
 
-# Node 6: Human Gate 
+# node 6: human gate 
 
 def human_gate_node(state: AgentState) -> dict:
     """
@@ -73,26 +73,28 @@ def _verify_recovery(service: str, metric_name: str = "p99_latency_s",
                      threshold: float = 5.0, timeout: int = 15, polls: int = 3) -> bool:
     """
     poll prometheus a few times to make sure things are actually getting better.
-    returns true if metric is good now.
+    returns true only if ALL polls show metric below threshold (sustained recovery).
     """
     from src.tools.prometheus_tool import collect_incident_signals
 
     interval = max(1, timeout // polls)
+    good = 0
     for i in range(polls):
         time.sleep(interval)
         try:
             signals = collect_incident_signals(service)
             current = signals.get(metric_name)
             if current is not None and current < threshold:
-                print(f"[execute] Verification poll {i+1}/{polls}: {metric_name}={current:.3f} < {threshold} ")
-                return True
-            print(f"[execute] Verification poll {i+1}/{polls}: {metric_name}={current:.3f} >= {threshold} ")
+                good += 1
+                print(f"[execute] Verification poll {i+1}/{polls}: {metric_name}={current:.3f} < {threshold}")
+            else:
+                print(f"[execute] Verification poll {i+1}/{polls}: {metric_name}={current:.3f} >= {threshold}")
         except Exception as e:
             print(f"[execute] Verification poll {i+1}/{polls} failed: {e}")
-    return False
+    return good == polls
 
 
-# Node 7: Execute
+# node 7: execute
 
 def execute_node(state: AgentState) -> dict:
     """
@@ -124,7 +126,7 @@ def execute_node(state: AgentState) -> dict:
             "result": result.get("result") or result.get("error"),
         })
 
-    # Post-execution verification: confirm the metric actually improved
+    # post execution verification: confirm the metric actually improved
     service = state.get("raw_signals", {}).get("service", "payment_gateway")
     verified = False
     if all_success:
@@ -153,6 +155,7 @@ def execute_node(state: AgentState) -> dict:
 
     return {
         "action_plan": updated_plan,
+        "action_taken": "; ".join(a["action"] for a in action_plan),
         "resolution_status": status,
         "verified": verified,
         "resolved_at": datetime.datetime.utcnow().isoformat(),
