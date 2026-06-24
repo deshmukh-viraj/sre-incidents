@@ -90,11 +90,11 @@ def log_incident_run(
     best_hyp = max(hypotheses, key=lambda h: h.get("confidence", 0)) if hypotheses else {}
 
     confidence = best_hyp.get("confidence", 0.0)
-    diagnosed_runbooks = best_hyp.get("supporting_runbook") or result.get("root_cause", "none")
-    resolution_status = result.get("resoltution_status", "UNKNOWN")
+    diagnosed_runbooks = best_hyp.get("supporting_runbook") or result.get("root_cause") or "none"
+    resolution_status = result.get("resolution_status", "UNKNOWN")
 
     #determine if it was success (only RESOLVED counts, ESCALATED/FAILED do not count)
-    is_resolved = 1.0 if resolution_status == "RESOLVED" else 0.0
+    is_resolved = 1.0 if resolution_status and resolution_status.upper() == "RESOLVED" else 0.0
 
     try:
         #log numeric sre metrics using v4.x score_current_trace
@@ -107,7 +107,7 @@ def log_incident_run(
         # log grund truth comparison
         if scenario_name:
             expected_runbook = SCENARIO_EXPECTED_RUNBOOK.get(scenario_name, "unknown")
-            if expected_runbook:
+            if expected_runbook and diagnosed_runbooks:
                 is_correct = 1.0 if expected_runbook in diagnosed_runbooks else 0.0
                 client.score_current_trace(name="ground_truth_match", value=is_correct, data_type="NUMERIC")
 
