@@ -81,7 +81,7 @@ SCENARIO_PAYMENT_LATENCY_SPIKE = Scenario(
 
 
 # Scenario 2: Circuit Breaker Trip under Downstream Outage
-# account_ledger's postgres replica fails → ledger retries → CB trips
+# account_ledger's postgres replica fails -> ledger retries -> CB trips
 
 SCENARIO_CIRCUIT_BREAKER_TRIP = Scenario(
     id="RB-002",
@@ -146,7 +146,7 @@ SCENARIO_DATA_EXFILTRATION = Scenario(
     phases=[
         ScenarioPhase(
             name="credential_stuffing",
-            duration_seconds=-1,
+            duration_seconds=120,
             rps_multiplier={"api_gateway": 4.5},
             error_rate_override={"api_gateway": 0.08},  # 8% auth failures
         ),
@@ -158,7 +158,7 @@ SCENARIO_DATA_EXFILTRATION = Scenario(
         ),
         ScenarioPhase(
             name="rate_limit_kicks_in",
-            duration_seconds=-1,
+            duration_seconds=60,
             rps_multiplier={"api_gateway": 1.2},
             error_rate_override={"api_gateway": 0.45},  # 429s flooding
         ),
@@ -186,13 +186,13 @@ SCENARIO_DB_CONNECTION_EXHAUSTION = Scenario(
     phases=[
         ScenarioPhase(
             name="leak_growing",
-            duration_seconds=-1,
+            duration_seconds=90,
             db_pool_saturation={"postgres_primary": 0.70},
             latency_multiplier={"account_ledger": 2.5},
         ),
         ScenarioPhase(
             name="pool_near_exhaustion",
-            duration_seconds=-1,
+            duration_seconds=60,
             db_pool_saturation={"postgres_primary": 0.92},
             latency_multiplier={"account_ledger": 8.0},
             error_rate_override={"account_ledger": 0.15},
@@ -245,7 +245,7 @@ SCENARIO_COMPLIANCE_AUDIT = Scenario(
 
 
 # Scenario 6: Fraud Model Degradation
-# ML model serving stale weights → precision drops → false positive surge
+# ML model serving stale weights -> precision drops -> false positive surge
 
 SCENARIO_FRAUD_MODEL_DEGRADATION = Scenario(
     id="RB-006",
