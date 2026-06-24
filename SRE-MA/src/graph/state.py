@@ -95,7 +95,7 @@ class AgentState(TypedDict):
     model_used: Optional[str]
 
     #Timestamps
-    started_at: Optional[str]   
+    started_at: str 
     resolved_at: Optional[str]   
 
     #Error handling
