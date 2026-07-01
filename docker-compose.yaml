@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+#fake world
+  simulator:
+    image: insideviraj/fintech-sre-generator:latest
+    container_name: fintech-sre-simulator
+    command: ["python", "-m", "generators.main", "--mode", "scenario", "--scenario", "payment_latency_spike"]
+    networks:
+      - sre-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    networks:
+      - sre-network
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./fintech-sre-sim/config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./fintech-sre-sim/data:/prometheus
+      - ./fintech-sre-sim/alerts:/etc/prometheus/alerts:ro
+    depends_on:
+      - simulator
+    
+
+  agent:
+    image: insideviraj/sre-agent:v5
+    container_name: sre-agent
+    networks:
+      - sre-network
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+    depends_on:
+      - prometheus
+
+
+networks:
+  sre-network:
+    driver: bridge
