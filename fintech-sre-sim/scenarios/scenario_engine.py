@@ -1,7 +1,7 @@
 """
 scenario_engine.py
-Defines and executes the 6 core failure scenarios.
-Each scenario is a timed sequence of state mutations applied to the shared SCENARIO object,
+defines and executes the 7 core failure scenarios.
+aach scenario is a timed sequence of state mutations applied to the shared SCENARIO object,
 producing correlated anomalies across metrics, logs, and traces simultaneously.
 """
 
@@ -11,9 +11,6 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional
 from generators.metrics_generator import SCENARIO
-
-
-# Scenario phase: a snapshot of state to apply for a duration
 
 @dataclass
 class ScenarioPhase:
@@ -37,9 +34,9 @@ class Scenario:
     expected_alerts: List[str]
     slo_impact: str
 
-# Scenario 1: Payment Latency Spike
-# A downstream card rail throttles -> latency bleeds up through payment_gateway
-# Pattern: gradual ramp -> peak -> slow recovery
+# scenario 1: payment latency spike
+# a downstream card rail throttles -> latency bleeds up through payment_gateway
+# pattern: gradual ramp -> peak -> slow recovery
 
 
 SCENARIO_PAYMENT_LATENCY_SPIKE = Scenario(
@@ -80,7 +77,7 @@ SCENARIO_PAYMENT_LATENCY_SPIKE = Scenario(
 )
 
 
-# Scenario 2: Circuit Breaker Trip under Downstream Outage
+# scenario 2: circuit breaker trip under downstream outage
 # account_ledger's postgres replica fails -> ledger retries -> CB trips
 
 SCENARIO_CIRCUIT_BREAKER_TRIP = Scenario(
@@ -128,8 +125,8 @@ SCENARIO_CIRCUIT_BREAKER_TRIP = Scenario(
 )
 
 
-# Scenario 3: Data Exfiltration Alert
-# Anomalous bulk export + high-rate authenticated requests from single IP
+# scenario 3: data exfiltration alert
+# anomalous bulk export + high-rate authenticated requests from single IP
 
 SCENARIO_DATA_EXFILTRATION = Scenario(
     id="RB-003",
@@ -168,8 +165,8 @@ SCENARIO_DATA_EXFILTRATION = Scenario(
 
 
 
-# Scenario 4: DB Connection Pool Exhaustion
-# Memory leak in account_ledger v2.3.1 never closes connections
+# scenario 4: DB connection pool exhaustion
+# memory leak in account_ledger v2.3.1 never closes connections
 
 SCENARIO_DB_CONNECTION_EXHAUSTION = Scenario(
     id="RB-004",
@@ -214,8 +211,8 @@ SCENARIO_DB_CONNECTION_EXHAUSTION = Scenario(
 )
 
 
-# Scenario 5: Compliance Audit Event (SOX, PCI-DSS)
-# Simulates a triggered regulatory audit requiring evidence trail
+# scenario 5: compliance audit event (SOX, PCI-DSS)
+# simulates a triggered regulatory audit requiring evidence trail
 
 SCENARIO_COMPLIANCE_AUDIT = Scenario(
     id="RB-005",
@@ -244,7 +241,7 @@ SCENARIO_COMPLIANCE_AUDIT = Scenario(
 )
 
 
-# Scenario 6: Fraud Model Degradation
+# scenario 6: fraud model degradation
 # ML model serving stale weights -> precision drops -> false positive surge
 
 SCENARIO_FRAUD_MODEL_DEGRADATION = Scenario(
@@ -263,7 +260,7 @@ SCENARIO_FRAUD_MODEL_DEGRADATION = Scenario(
         ScenarioPhase(
             name="silent_drift",
             duration_seconds=120,
-            # No direct latency/error impact — precision degrades silently
+            #no direct latency/error impact — precision degrades silently
         ),
         ScenarioPhase(
             name="false_positive_surge",
@@ -281,7 +278,7 @@ SCENARIO_FRAUD_MODEL_DEGRADATION = Scenario(
     ],
 )
 
-# Scenario 7: Cascading Failure (DB Leak causes payment latency)
+#cenario 7: cascading failure (DB leak causes payment latency)
 SCENARIO_CASCADING_FAILURE = Scenario(
     id="RB-CASCADE",
     name="cascading_failure",
@@ -299,7 +296,7 @@ SCENARIO_CASCADING_FAILURE = Scenario(
             name="db_leak_starts",
             duration_seconds=60,
             db_pool_saturation={"postgres_primary": 0.75},
-            # Both services are affected
+            #both services are affected
             latency_multiplier={"Payment_gateway":2.0, "account_ledger": 3.0}, 
             error_rate_override={"account_ledger": 0.05},
         ),
@@ -335,7 +332,7 @@ ALL_SCENARIOS = {
 }
 
 
-# Scenario executor
+#scenario executor
 class ScenarioEngine:
     def __init__(self):
         self._thread: Optional[threading.Thread] = None
