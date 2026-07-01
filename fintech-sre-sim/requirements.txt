@@ -6,12 +6,11 @@ opentelemetry-exporter-otlp-proto-grpc
 requests
 pydantic
 langchain
-groq
-langchain
 langchain-community
+groq
 faiss-cpu
 sentence-transformers
-huggingface
+huggingface-hub
 neo4j
 uvicorn
 fastapi
