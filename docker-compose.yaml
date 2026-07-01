@@ -24,6 +24,19 @@ services:
       - simulator
     
 
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    networks:
+      - sre-network
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./fintech-sre-sim/config/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+    depends_on:
+      - prometheus
+   
+
   agent:
     image: insideviraj/sre-agent:v5
     container_name: sre-agent
@@ -33,10 +46,12 @@ services:
       - "8080:8080"
     env_file:
       - .env
+      - ./SRE-MA/.env
     environment:
       - PROMETHEUS_URL=http://prometheus:9090
     depends_on:
       - prometheus
+      - alertmanager
 
 
 networks:
