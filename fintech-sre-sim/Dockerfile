@@ -1,35 +1,36 @@
-# Dockerfile
-# Builds the fintech SRE simulation data generator container.
-# Produces: Prometheus metrics on :8000/metrics + structured JSON logs to stdout/file
+#dockerfile
+# building the fintech sre simulation data generator container here.
+# it spits out prometheus metrics on :8000/metrics and structured json logs to stdout or a file.
 
 FROM python:3.10-slim
+#setting up our working directory
+WORKDIR /app
+#grabbing just the system dependencies we actually need for the generator
 
-# System deps — only what's needed for the generator
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
 
-# Copy and install Python dependencies first (layer caching)
+#copying and installing python dependencies first to take advantage of layer caching
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy the full project
+RUN pip install --no-cache-dir --default-timeout=100 --retries 10 -r requirements.txt
+#copy over the rest of the project files
 COPY generators/ ./generators/
 COPY config/ ./config/
+COPY scenarios/ ./scenarios/
 
-# Create logs directory for file output mode
+#making a logs directory in case we want to output to a file
 RUN mkdir -p /app/logs
 
-# Expose Prometheus metrics endpoint
+# opening up the port for our prometheus metrics endpoint
 EXPOSE 8000
 
-# Health check — verifies metrics endpoint is responding
+# doing a quick health check to verify the metrics endpoint is responding
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Default: steady-state baseline generation
-# Override with --mode scenario --scenario <name> or --mode training
+# default behavior is steady-state baseline generation.
+# you can override this with --mode scenario --scenario <name> or --mode training.
 CMD ["python", "-m", "generators.main", "--mode", "steady", "--metrics-port", "8000"]
