@@ -40,10 +40,10 @@ class ActionItem(TypedDict):
     tool: str            # which sre_tool to call
     params: Dict[str, Any] 
     blast_radius:str            
-    reversible:  bool
+    reversible: bool
     requires_approval: bool
-    executed:  bool
-    result:  Optional[str]
+    executed: bool
+    result: Optional[str]
 
 
 class AgentState(TypedDict):
@@ -52,10 +52,10 @@ class AgentState(TypedDict):
     active_scenario: Optional[str]   # ground-truth label from simulator
 
     #raw input signals 
-    raw_signals:  Dict[str, Any]  #alert labels + metric
-    alert_name:  Optional[str]
+    raw_signals: Dict[str, Any]  #alert labels + metric
+    alert_name: Optional[str]
     runbook_id: Optional[str] 
-    team:  Optional[str]
+    team: Optional[str]
 
     #detector outputs
     incident_summary:Optional[str]
@@ -83,6 +83,7 @@ class AgentState(TypedDict):
     escalation_message: Optional[str]   
 
     #resolution tracking
+    action_taken: str
     resolution_status: str             # resolutionStatus enum value
     resolution_notes:Optional[str]
     mttr_seconds:Optional[int]
