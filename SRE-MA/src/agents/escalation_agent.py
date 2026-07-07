@@ -25,7 +25,7 @@ def escalate_node(state: AgentState) -> dict:
     call this when we've tried everything and still don't know what's wrong.
     sends a slack message to wake up the on-call person.
     """
-    print(f"\n[escalate] Escalating {state['incident_id']} — diagnosis confidence too low")
+    print(f"\n[escalate] Escalating {state['incident_id']}, evaluating escalation reason....")
 
     incident_id = state['incident_id']
     severity = state.get('severity', 'unknown')

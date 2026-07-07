@@ -1,15 +1,15 @@
 """
 agents/communicator_agent.py
 ------------
-Communicator agent: generates three stakeholder-appropriate messages in parallel
+communicator agent: generates three stakeholder-appropriate messages in parallel
 with the diagnoser — does NOT wait for root cause.
 
-Outputs:
-    1.status_page_update   — customer-facing, no internal details
-    2.war_room_summary     — internal Slack, full technical context
-    3.escalation_message   — PagerDuty escalation (SEV1/SEV2 only)
+outputs:
+    status_page_update —     customer-facing, no internal details
+    war_room_summary — internal slack, full technical context
+    escalation_message — pagerduty escalation (SEV1/SEV2 only)
 
-Writes to state:
+writes to state:
     status_page_update, war_room_summary, escalation_message,
     total_token_used, total_cost_used
 """
@@ -24,7 +24,7 @@ from src.agents.utils import _get_llm
 load_dotenv()
 
 
-# Node: Communicator
+#node: communicator
 
 def communicator_node(state: AgentState) -> dict:
     """

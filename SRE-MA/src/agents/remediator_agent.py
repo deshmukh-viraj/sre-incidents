@@ -1,14 +1,14 @@
 """
 agents/remediator_agent.py
 --------------------------
-Remediator agent: builds and validates an action plan from the diagnosed root cause.
+remediator agent: builds and validates an action plan from the diagnosed root cause.
 
-Resolution paths:
+esolution paths:
     A. Known runbook match  -> deterministic action list from _build_action_plan
     B. Novel alert + KG suggestion -> KG-based action (requires approval)
     C. No runbook, no KG   -> safe mitigation tier based on severity
 
-Writes to state:
+writes to state:
     action_plan, requires_approval
 """
 
@@ -16,7 +16,7 @@ from src.graph.state import AgentState
 from src.graph.routing import classify_blast_radius, requires_human_approval
 
 
-# Node: Remediator 
+#node: remediator 
 
 def remediator_node(state: AgentState) -> dict:
     """
@@ -58,12 +58,12 @@ def remediator_node(state: AgentState) -> dict:
             "result": None,
         }]
 
-    # Path C: safe fallback based on severity + signal pattern
+    # path C: safe fallback based on severity + signal pattern
     else:
         print("[remediator] Path C — safe mitigation")
         action_plan = _build_safe_mitigation(state)
 
-    # safety layer: fill blast_radius / approval if not already set by Path A
+    #safety layer: fill blast_radius / approval if not already set by Path A
     needs_approval = False
     for action in action_plan:
         if not action.get("blast_radius"):

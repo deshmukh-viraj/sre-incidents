@@ -1,17 +1,17 @@
 """
 agents/diagnoser_agent.py
 --------------------------
-Diagnoser agent: two nodes in the LangGraph pipeline.
+diagnoser agent: two nodes in the LangGraph pipeline.
 
-    diagnoser_node   — Option A: deterministic pattern matching, no LLM
-    llm_diagnoser    — Option B: LLM + FAISS runbooks + Neo4j KG fallback
+    diagnoser_node  — deterministic pattern matching, no LLM
+    llm_diagnoser   — LLM + FAISS runbooks + Neo4j KG fallback
 
-Responsibility:
+responsibility:
     - try deterministic diagnosis first (fast, free, no API calls)
     - fall back to LLM only when deterministic confidence is too low
     - extract both root cause and suggested remediation from context
 
-Writes to state:
+writes to state:
     hypotheses, root_cause, diagnosis_summary, evidence_summary, blast_analysis, 
     llm_suggested_action, diagnosis_mode, model_used, total_token_used, total_cost_usd
 

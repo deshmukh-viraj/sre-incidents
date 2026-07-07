@@ -1,14 +1,14 @@
 """
 agents/detector_agent.py
 ------------------------
-Detector agent: first node in the LangGraph pipeline.
+detector agent: first node in the LangGraph pipeline.
 
-Responsibility:
-    - Collect Prometheus metrics + Loki log patterns via collect_all_signals
-    - Infer affected service from alert name if not explicitly set
-    - Classify severity from numeric signals only (no LLM)
+responsibility:
+    - collect prometheus metrics + loki log patterns via collect_all_signals
+    - infer affected service from alert name if not explicitly set
+    - classify severity from numeric signals only (no LLM)
 
-Writes to state:
+writes to state:
     raw_signals, severity, affected_services, resolution_status
 """
 
@@ -16,8 +16,7 @@ from src.graph.state import AgentState, ResolutionStatus
 from src.graph.routing import classify_severity
 from src.tools.sre_tool import collect_all_signals
 
-
-# Node 1: detector
+#node 1: detector
 
 def detector_node(state: AgentState) -> dict:
     """
@@ -50,7 +49,7 @@ def detector_node(state: AgentState) -> dict:
     }
 
 
-# Private helper
+#private helper
 def _infer_service(alert_name: str) -> str:
     """guess the service based on alert name keywords"""
     mapping = {
