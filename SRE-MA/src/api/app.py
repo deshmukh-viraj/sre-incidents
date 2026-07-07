@@ -53,7 +53,7 @@ token_counter = Counter(
     "agent_tokens_total", "Total LLM tokens consumed"
 )
 
-#TODI: prod architecture should use the alertmanager api to create a silence for this alertname/service pair 
+#prod architecture should use the alertmanager api to create a silence for this alertname/service pair 
 #instead of in-memmory debouncing
 #silencing provides bi-directional feedback and survives api restarts
 #track last processed time for alert signatures
@@ -127,7 +127,7 @@ def _run_agent(incident_id: str, raw_signals: dict, config:dict):
         if tokens:
             token_counter.inc(tokens)
 
-        print(f"[agent] Graph completed for {incident_id} — status={status}")
+        print(f"[agent] Graph completed for {incident_id} —> status={status}")
 
     except Exception as e:
         print(f"[agent] *** AGENT CRASHED for {incident_id} ***")
