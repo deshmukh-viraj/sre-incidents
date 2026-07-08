@@ -5,3 +5,4 @@ projectflow_sre_agent.txt
 banana
 .venv
 .env
+.agents/
