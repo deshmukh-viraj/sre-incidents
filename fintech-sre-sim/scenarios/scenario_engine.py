@@ -370,13 +370,23 @@ class ScenarioEngine:
                     on_phase_change(scenario.name, phase.name)
                 
                 if phase.duration_seconds == -1:
-                    print(f"[scenario]   Phase: {phase.name} (infinite- waiting for manual resolution)")
+                    print(f"[scenario]   Phase: {phase.name} (infinite — waiting for /control/resolve)")
                     while not self._stop_event.is_set() and not self._resolved_event.is_set():
                         time.sleep(1)
+                    if self._resolved_event.is_set():
+                        print(f"[scenario]   -> Resolved! Advancing to recovery.")
+                        self._resolved_event.clear()
                 
                 else: 
                     print(f"[scenario]   Phase: {phase.name} ({phase.duration_seconds}s)")
-                    self._stop_event.wait(timeout=phase.duration_seconds)
+                    end_time = time.time() + phase.duration_seconds
+                    while time.time() < end_time:
+                        if self._stop_event.wait(timeout=1):
+                            break
+                        if self._resolved_event.is_set():
+                            print(f"[scenario]   -> Phase {phase.name} cut short by /control/resolve")
+                            self._resolved_event.clear()
+                            break
         
         
         finally:
