@@ -94,7 +94,7 @@ def main():
         print(f"[main] Will stop automatically after {duration_minutes} minutes")
 
     def on_phase(scenario_name, phase_name):
-        print(f"[main] Phase change → {scenario_name}:{phase_name}")
+        print(f"[main] Phase change -> {scenario_name}:{phase_name}")
 
     def shutdown(sig=None, frame=None):
         print("\n[main] Shutting down...")
@@ -113,7 +113,7 @@ def main():
         while not timed_out():
             time.sleep(1)
         if timed_out():
-            print("[main] Duration reached — stopping.")
+            print("[main] Duration reached -> stopping.")
             shutdown()
 
     if args.mode == "steady":
