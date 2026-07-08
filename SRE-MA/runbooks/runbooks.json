@@ -1,0 +1,115 @@
+{
+  "RB-001": [
+    {
+      "action": "Enable card_rails request queuing",
+      "tool": "set_feature_flag",
+      "params": {
+        "flag": "card_rails_queue_enabled",
+        "value": true,
+        "service": "payment_gateway"
+      },
+      "blast_radius": "pod",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    }
+  ],
+  "RB-002": [
+    {
+      "action": "Rolling restart of account_ledger to clear circuit breaker",
+      "tool": "rolling_restart",
+      "params": {
+        "service": "account_ledger"
+      },
+      "blast_radius": "service",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    }
+  ],
+  "RB-003": [
+    {
+      "action": "Block attacking IP at api_gateway",
+      "tool": "block_ip",
+      "params": {
+        "service": "api_gateway",
+        "ip": "{attacking_ip}"
+      },
+      "blast_radius": "pod",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    },
+    {
+      "action": "Revoke compromised API key",
+      "tool": "revoke_api_key",
+      "params": {
+        "key_id": "{compromised_key}"
+      },
+      "blast_radius": "service",
+      "reversible": false,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    }
+  ],
+  "RB-004": [
+    {
+      "action": "Rolling restart of account_ledger pods to release leaked connections",
+      "tool": "rolling_restart",
+      "params": {
+        "service": "account_ledger"
+      },
+      "blast_radius": "service",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    }
+  ],
+  "RB-005": [
+    {
+      "action": "Export audit evidence logs for compliance team",
+      "tool": "export_logs",
+      "params": {
+        "service": "all",
+        "duration": "24h"
+      },
+      "blast_radius": "pod",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    }
+  ],
+  "RB-006": [
+    {
+      "action": "Restart feature pipeline to force fresh data pull",
+      "tool": "restart_service",
+      "params": {
+        "service": "feature_pipeline"
+      },
+      "blast_radius": "service",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    },
+    {
+      "action": "Enable fraud model fallback rule-based scorer",
+      "tool": "set_feature_flag",
+      "params": {
+        "flag": "fraud_model_fallback_enabled",
+        "value": true
+      },
+      "blast_radius": "pod",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    }
+  ]
+}
