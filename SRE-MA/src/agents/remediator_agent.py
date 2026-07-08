@@ -2,16 +2,10 @@
 agents/remediator_agent.py
 --------------------------
 remediator agent: builds and validates an action plan from the diagnosed root cause.
-
-esolution paths:
-    A. Known runbook match  -> deterministic action list from _build_action_plan
-    B. Novel alert + KG suggestion -> KG-based action (requires approval)
-    C. No runbook, no KG   -> safe mitigation tier based on severity
-
-writes to state:
-    action_plan, requires_approval
 """
 
+import json
+import os
 from src.graph.state import AgentState
 from src.graph.routing import classify_blast_radius, requires_human_approval
 
@@ -19,10 +13,6 @@ from src.graph.routing import classify_blast_radius, requires_human_approval
 #node: remediator 
 
 def remediator_node(state: AgentState) -> dict:
-    """
-    make the action plan.
-    if runbook matches, use it. otherwise ask llm for help.
-    """
     print(f"\n[remediator] Building action plan for {state['incident_id']}")
 
     hypotheses = state.get("hypotheses", [])
@@ -79,129 +69,40 @@ def remediator_node(state: AgentState) -> dict:
     return {"action_plan": action_plan, "requires_approval": needs_approval}
 
 
-# private helpers
-
 def _build_action_plan(runbook_id: str, state: AgentState) -> list:
-    """
-    hardcoded plans for known runbooks.
-    """
-    service = state.get("affected_services", ["unknown"])[0]
+    """load action plan from json."""
     raw = state.get("raw_signals", {})
+    plans_path = os.path.join(os.path.dirname(__file__), "..", "runbooks", "runbooks.json")
+    
+    try:
+        with open(plans_path, "r") as f:
+            plans = json.load(f)
+    except FileNotFoundError:
+        plans = {}
 
-    plans = {
-        "RB-001": [
-            {
-                "action": "Enable card_rails request queuing",
-                "tool": "set_feature_flag",
-                "params": {"flag": "card_rails_queue_enabled", "value": True, "service": "payment_gateway"},
-                "blast_radius": "pod",
-                "reversible": True,
-                "requires_approval": False,
-                "executed": False,
-                "result": None,
-            }
-        ],
-        "RB-002": [
-            {
-                "action": "Rolling restart of account_ledger to clear circuit breaker",
-                "tool": "rolling_restart",
-                "params": {"service": "account_ledger"},
-                "blast_radius": "service",
-                "reversible": True,
-                "requires_approval": False,
-                "executed": False,
-                "result":  None,
-            }
-        ],
-        "RB-003": [
-            {
-                "action": "Block attacking IP at api_gateway",
-                "tool": "block_ip",
-                "params": {"service": "api_gateway", "ip": raw.get("attacking_ip", "unknown")},
-                "blast_radius": "pod",
-                "reversible": True,
-                "requires_approval": False,
-                "executed": False,
-                "result":  None,
-            },
-            {
-                "action": "Revoke compromised API key",
-                "tool": "revoke_api_key",
-                "params": {"key_id": raw.get("compromised_key", "unknown")},
-                "blast_radius": "service",
-                "reversible": False,
-                "requires_approval": False,
-                "executed": False,
-                "result": None,
-            },
-        ],
-        "RB-004": [
-            {
-                "action": "Rolling restart of account_ledger pods to release leaked connections",
-                "tool": "rolling_restart",
-                "params": {"service": "account_ledger"},
-                "blast_radius": "service",
-                "reversible": True,
-                "requires_approval": False,
-                "executed": False,
-                "result": None,
-            }
-        ],
-        "RB-005": [
-            {
-                "action": "Export audit evidence logs for compliance team",
-                "tool": "export_logs",
-                "params": {"service": "all", "duration": "24h"},
-                "blast_radius": "pod",
-                "reversible": True,
-                "requires_approval": False,
-                "executed": False,
-                "result": None,
-            }
-        ],
-        "RB-006": [
-            {
-                "action": "Restart feature pipeline to force fresh data pull",
-                "tool": "restart_service",
-                "params": {"service": "feature_pipeline"},
-                "blast_radius": "service",
-                "reversible": True,
-                "requires_approval": False,
-                "executed": False,
-                "result":  None,
-            },
-            {
-                "action": "Enable fraud model fallback rule-based scorer",
-                "tool": "set_feature_flag",
-                "params": {"flag": "fraud_model_fallback_enabled", "value": True},
-                "blast_radius": "pod",
-                "reversible": True,
-                "requires_approval": False,
-                "executed": False,
-                "result": None,
-            },
-        ],
-    }
+    plan = plans.get(runbook_id)
+    if plan:
 
-    return plans.get(runbook_id, [
-        {
-            "action": "Escalate to on-call engineer",
-            "tool": "notify",
-            "params": {"channel": "incidents", "severity": "critical"},
-            "blast_radius": "pod",
-            "reversible": True,
-            "requires_approval": False,
-            "executed": False,
-            "result": None,
-        }
-    ])
+        plan_str = json.dumps(plan)
+        if "{attacking_ip}" in plan_str:
+            plan_str = plan_str.replace("{attacking_ip}", raw.get("attacking_ip", "unknown"))
+        if "{compromised_key}" in plan_str:
+            plan_str = plan_str.replace("{compromised_key}", raw.get("compromised_key", "unknown"))
+        return json.loads(plan_str)
+
+    return [{
+        "action": "Escalate to on-call engineer",
+        "tool": "notify",
+        "params": {"channel": "incidents", "severity": "critical"},
+        "blast_radius": "pod",
+        "reversible": True,
+        "requires_approval": False,
+        "executed": False,
+        "result": None,
+    }]
 
 
 def _build_safe_mitigation(state: AgentState) -> list:
-    """
-    path C no runbook, no KG action.
-    three tiers based on severity and signal pattern.
-    """
     severity = state.get("severity", "SEV3")
     signals = state.get("raw_signals", {})
     service = state.get("affected_services", ["unknown"])[0]
