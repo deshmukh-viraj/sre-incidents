@@ -150,7 +150,7 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     client = Langfuse()
     trace_id = client.get_current_trace_id()
 
-    # attach SRE metadata to the current span (v4.x API)
+    # attach SRE metadata to the current span
     scenario_name = raw_signals.get("scenario_name")
     tags = ["sre-agent", raw_signals.get("alert_name", "unknown")]
     if scenario_name:
@@ -169,24 +169,39 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     print(f"[Lanfusr] View trace in brower:{trace_url}")
     
     # compute mttr use state value, or calculate from timestamps
-    mttr = result.get('mttr_seconds')
-    if mttr is None:
-        started = result.get('started_at')
-        resolved = result.get('resolved_at')
-        if started and resolved:
+    business_mttr = result.get('business_mttr_seconds')
+    if business_mttr is None:
+        started = result.get('alert_started_at')
+        verified = result.get('verified_at')
+        if started and verified:
             import datetime
             try:
-                t0 = datetime.datetime.fromisoformat(started)
-                t1 = datetime.datetime.fromisoformat(resolved)
-                mttr = int((t1 - t0).total_seconds())
+                t0 = datetime.datetime.fromisoformat(started.replace("Z", "+00:00")).replace(tzinfo=None)
+                t1 = datetime.datetime.fromisoformat(verified.replace("Z", "+00:00")).replace(tzinfo=None)
+                business_mttr = int((t1 - t0).total_seconds())
             except (ValueError, TypeError):
                 pass
-    mttr_display = f"{mttr}s" if mttr is not None else "N/A"
+                
+    agent_mttr = result.get('agent_mttr_seconds')
+    if agent_mttr is None:
+        invoked = result.get('agent_invoked_at')
+        executed = result.get('action_executed_at')
+        if invoked and executed:
+            import datetime
+            try:
+                t0 = datetime.datetime.fromisoformat(invoked.replace("Z", "+00:00")).replace(tzinfo=None)
+                t1 = datetime.datetime.fromisoformat(executed.replace("Z", "+00:00")).replace(tzinfo=None)
+                agent_mttr = int((t1 - t0).total_seconds())
+            except (ValueError, TypeError):
+                pass
+                
+    b_mttr_display = f"{business_mttr}s" if business_mttr is not None else "N/A"
+    a_mttr_display = f"{agent_mttr}s" if agent_mttr is not None else "N/A"
 
     print(f"\n{'='*60}")
     print(f"RESOLVED: {incident_id}")
     print(f"Status: {result.get('resolution_status')}")
-    print(f"MTTR: {mttr_display}")
+    print(f"Business MTTR: {b_mttr_display} | Agent MTTR: {a_mttr_display}")
     print(f"Root cause: {result.get('root_cause', 'escalated')}")
     print(f"Diagnosis Summary: {result.get('diagnosis_summary')}")
     print(f"Evidence Summary: {result.get('evidence_summary')}")
