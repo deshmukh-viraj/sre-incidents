@@ -86,7 +86,8 @@ class AgentState(TypedDict):
     action_taken: str
     resolution_status: str             # resolutionStatus enum value
     resolution_notes:Optional[str]
-    mttr_seconds:Optional[int]
+    business_mttr_seconds:Optional[int]
+    agent_mttr_seconds:Optional[int]
     verified: bool                     # true if post execution metric check passed
 
     #LLM cost tracking
@@ -96,11 +97,15 @@ class AgentState(TypedDict):
     model_used: Optional[str]
 
     #Timestamps
-    started_at: str 
-    resolved_at: Optional[str]   
+    alert_started_at: str 
+    agent_invoked_at: str 
+    action_executed_at: Optional[str]   
+    verified_at: Optional[str]   
 
     #Error handling
     errors: List[str]       # non fatal errors encountered
+    final_p99_latency_s: Optional[float]
+    error_rate: Optional[float]
 
 
 def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
@@ -139,7 +144,8 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
 
         resolution_status=ResolutionStatus.OPEN.value,
         resolution_notes=None,
-        mttr_seconds=None,
+        business_mttr_seconds=None,
+        agent_mttr_seconds=None,
         verified=False,
 
         llm_suggested_action=None,
@@ -147,12 +153,15 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         token_cost_usd=0.0,
         model_used=None,
 
-        started_at=datetime.datetime.utcnow().isoformat(),
-        resolved_at=None,
+        alert_started_at=raw_signals.get('alert_started_at') or datetime.datetime.utcnow().isoformat(),
+        agent_invoked_at=datetime.datetime.utcnow().isoformat(),
+        action_executed_at=None,
+        verified_at=None,
         errors=[],
 
         diagnosis_summary= None,
         evidence_summary=None,
         blast_analysis=None,
-
+        final_p99_latency_s = None,
+        error_rate = None,
     )
