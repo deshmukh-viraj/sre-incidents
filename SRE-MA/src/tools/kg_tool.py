@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "sreagentpassword")
+NEO4J_USER = os.getenv("NEO4J_USERNAME")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 try:
     from neo4j import GraphDatabase
@@ -64,17 +64,17 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
 
                 # 4. past incidents
                 if alert_name:
-                    past_q = "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) WHERE p.success = true RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, p.mttr_seconds AS mttr_seconds, p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
+                    past_q = "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) WHERE p.success = true RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, p.business_mttr_seconds AS business_mttr_seconds, p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
                     past_result = session.run(past_q, alert_name=alert_name)
                 else:
-                    past_q = "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert)-[:AFFECTS]->(s:Service {name: $service}) WHERE p.success = true RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, p.mttr_seconds AS mttr_seconds, p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
+                    past_q = "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert)-[:AFFECTS]->(s:Service {name: $service}) WHERE p.success = true RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, p.business_mttr_seconds AS business_mttr_seconds, p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
                     past_result = session.run(past_q, service=service)
                 
                 records = [dict(r) for r in past_result]
                 if not records:
                     return "no past incidents found for this alert"
                 past = records[0]
-                context_sections.append(f"[Past Incident] Similar incident on {service}: root_cause='{past['root_cause']}', fixed_by='{past['action_taken']}', mttr={past['mttr_seconds']}s, success={past['success']}.")
+                context_sections.append(f"[Past Incident] Similar incident on {service}: root_cause='{past['root_cause']}', fixed_by='{past['action_taken']}', mttr={past['business_mttr_seconds']}s, success={past['success']}.")
 
     except Exception as e:
         return f"knowledge graph query failed: {str(e)}"
@@ -85,15 +85,15 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
     return "\n\n".join(context_sections)
 
 
-def append_past_incident(incident_id: str, alert_name: str, root_cause: str, action_taken: str, mttr_seconds: int, success: bool) -> None:
+def append_past_incident(incident_id: str, alert_name: str, root_cause: str, action_taken: str, business_mttr_seconds: int, success: bool) -> None:
     if driver is None:
         print("[kg_tool] cannot append incident — Neo4j unavailable")
         return
     try:
         with driver.session() as session:
             session.run(
-                "CREATE (p:PastIncident { incident_id: $incident_id, root_cause: $root_cause, action_taken: $action_taken, mttr_seconds: $mttr_seconds, success: $success, timestamp: datetime() })",
-                incident_id=incident_id, root_cause=root_cause, action_taken=action_taken, mttr_seconds=mttr_seconds, success=success,
+                "CREATE (p:PastIncident { incident_id: $incident_id, root_cause: $root_cause, action_taken: $action_taken, business_mttr_seconds: $business_mttr_seconds, success: $success, timestamp: datetime() })",
+                incident_id=incident_id, root_cause=root_cause, action_taken=action_taken, business_mttr_seconds=business_mttr_seconds, success=success,
             )
             session.run(
                 "MATCH (p:PastIncident {incident_id: $incident_id}), (a:Alert {name: $alert_name}) CREATE (p)-[:TRIGGERED_BY]->(a)",
