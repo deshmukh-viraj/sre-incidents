@@ -14,7 +14,8 @@ from src.graph.state import AgentState, Severity
 #thresholds
 
 P99_LATENCY_CRITICAL= 3.0    # seconds — SEV1
-P99_LATENCY_WARNING = 1.5     # seconds — SEV2/3
+P99_LATENCY_WARNING = 1.5  # seconds — SEV2/3
+P99_LATENCY_RECOVERY = 0.5   
 ERROR_RATE_CRITICAL= 0.10    # 10%
 ERROR_RATE_WARNING = 0.05    # 5%
 THROTTLE_RATE_HIGH = 0.05    # 429/504 rate
