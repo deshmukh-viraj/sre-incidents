@@ -41,9 +41,14 @@ _incidents = {}
 incident_counter = Counter(
     "agent_incident_total", "Total incidents processed", ["status", "severity"],
 )
-mttr_hist = Histogram(
-    "agent_mttr_seconds",
-    "MTTR distribution in seconds",
+business_mttr_hist = Histogram(
+    "agent_business_mttr_seconds",
+    "Business MTTR distribution in seconds",
+    buckets=[5,10,30,60,120,300,600]
+)
+agent_mttr_hist = Histogram(
+    "agent_execution_latency_seconds",
+    "Agent execution latency distribution in seconds",
     buckets=[5,10,30,60,120,300,600]
 )
 active_gauge = Gauge(
@@ -107,10 +112,14 @@ def _run_agent(incident_id: str, raw_signals: dict, config:dict):
                 "diagnosis_summary": result.get('diagnosis_summary'),
                 "blast_analysis": result.get('blast_analysis'),
                 "evidence_summary": result.get('evidence_summary'),
-                "mttr_seconds": result.get('mttr_seconds'),
+                "business_mttr_seconds": result.get('business_mttr_seconds'),
+                "agent_mttr_seconds": result.get('agent_mttr_seconds'),
                 "total_tokens_used": result.get('total_tokens_used'),
                 "token_cost_usd": result.get('token_cost_usd'),
-                "resolved_at": result.get('resolved_at'),
+                "alert_started_at": result.get('alert_started_at'),
+                "agent_invoked_at": result.get('agent_invoked_at'),
+                "action_executed_at": result.get('action_executed_at'),
+                "verified_at": result.get('verified_at'),
                 "escalation_message": result.get('escalation_message'),
                 "status_page_update": result.get('status_page_update'),
                 "war_room_summary": result.get('war_room_summary')
@@ -120,9 +129,12 @@ def _run_agent(incident_id: str, raw_signals: dict, config:dict):
         severity = raw_signals.get('severity', 'unknown')
 
         incident_counter.labels(status=status, severity=severity).inc()
-        mttr = result.get("mttr_seconds")
-        if mttr:
-            mttr_hist.observe(mttr)
+        business_mttr = result.get("business_mttr_seconds")
+        if business_mttr:
+            business_mttr_hist.observe(business_mttr)
+        agent_mttr = result.get("agent_mttr_seconds")
+        if agent_mttr:
+            agent_mttr_hist.observe(agent_mttr)
         tokens = result.get('total_tokens_used', 0)
         if tokens:
             token_counter.inc(tokens)
@@ -152,8 +164,12 @@ def _resume_agent(incident_id: str, config: dict):
             _incidents[incident_id].update({
                 "status": result.get('resolution_status'),
                 "action_plan": result.get('action_plan'),
-                "mttr_seconds": result.get('mttr_seconds'),
-                "resolved_at": result.get('resolved_at'),
+                "business_mttr_seconds": result.get('business_mttr_seconds'),
+                "agent_mttr_seconds": result.get('agent_mttr_seconds'),
+                "alert_started_at": result.get('alert_started_at'),
+                "agent_invoked_at": result.get('agent_invoked_at'),
+                "action_executed_at": result.get('action_executed_at'),
+                "verified_at": result.get('verified_at'),
             })
 
         print(f"[agent] Graph completed for {incident_id} — status={result.get('resolution_status')}")
@@ -178,15 +194,18 @@ def _create_record(incident_id: str, raw_signals: dict, source: str) -> dict:
         "runbook_id": raw_signals.get("runbook"),
         "team": raw_signals.get("team"),
         "source": source,
-        "created_at": datetime.utcnow().isoformat(),
+        "alert_started_at": raw_signals.get("alert_started_at") or datetime.utcnow().isoformat(),
+        "agent_invoked_at": datetime.utcnow().isoformat(),
         "raw_signals": raw_signals,
         "root_cause": None,
         "diagnosis_summary": None,
         "evidence_summary": None,
         "blast_analysis": None,
         "action_plan": [],
-        "mttr_seconds": None,
-        "resolved_at": None,
+        "business_mttr_seconds": None,
+        "agent_mttr_seconds": None,
+        "action_executed_at": None,
+        "verified_at": None,
         "error": None
     }
 
@@ -283,7 +302,7 @@ async def alertmanager_webhook(
             "team": labels.get("team"),
             "severity": labels.get("severity"),
             "service": labels.get("service"),
-            "fired_at": alert.startsAt,
+            "alert_started_at": alert.startsAt,
             "summary": annots.get("summary"),
             "description": annots.get("description")
         }
@@ -310,7 +329,7 @@ async def list_incidents(
     if status:
         incidents = [i for i in incidents if i.get('status')==status] 
         
-    incidents.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+    incidents.sort(key=lambda x: x.get('alert_started_at', ''), reverse=True)
     return incidents[:limit]
 
     
@@ -377,7 +396,7 @@ async def resolve_incident(incident_id: str, payload: ResolveRequest):
         raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")
 
     _incidents[incident_id]["status"] = ResolutionStatus.RESOLVED.value
-    _incidents[incident_id]["resolved_at"] = datetime.datetime.utcnow().isoformat()
+    _incidents[incident_id]["verified_at"] = datetime.utcnow().isoformat()
     _incidents[incident_id]["resolution_notes"] = payload.notes
 
     return {"status": "resolved", "incident_id": incident_id}
