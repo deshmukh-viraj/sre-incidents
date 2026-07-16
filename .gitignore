@@ -6,3 +6,4 @@ banana
 .venv
 .env
 .agents/
+docs/

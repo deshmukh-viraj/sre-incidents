@@ -6,14 +6,13 @@ services:
     image: insideviraj/fintech-sre-generator:latest
     container_name: fintech-sre-simulator
     command: ["python", "-m", "generators.main", "--mode", "scenario", "--scenario", "payment_latency_spike"]
-    networks:
-      - sre-network
+    volumes:
+      - ./fintech-sre-sim/logs:/app/logs
+      - ./fintech-sre-sim:/app
 
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
-    networks:
-      - sre-network
     ports:
       - "9090:9090"
     volumes:
@@ -23,12 +22,9 @@ services:
     depends_on:
       - simulator
     
-
   alertmanager:
     image: prom/alertmanager:latest
     container_name: alertmanager
-    networks:
-      - sre-network
     ports:
       - "9093:9093"
     volumes:
@@ -36,12 +32,9 @@ services:
     depends_on:
       - prometheus
    
-
   agent:
-    image: insideviraj/sre-agent:v5
+    image: insideviraj/sre-agent:v6
     container_name: sre-agent
-    networks:
-      - sre-network
     ports:
       - "8080:8080"
     env_file:
@@ -49,11 +42,49 @@ services:
       - ./SRE-MA/.env
     environment:
       - PROMETHEUS_URL=http://prometheus:9090
+      - LOKI_URL=http://loki:3100
+      - NEO4J_URI=bolt://neo4j:7687
+    volumes:
+      - ./SRE-MA/src:/app/src
+      - ./SRE-MA/runbooks:/app/runbooks
     depends_on:
       - prometheus
       - alertmanager
+      - loki
+      - neo4j
+
+  loki:
+    image: grafana/loki:2.9.6
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./fintech-sre-sim/config/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:2.9.6
+    volumes:
+      - ./fintech-sre-sim/config/promtail.yml:/etc/promtail/config.yml:ro
+      - ./fintech-sre-sim/logs:/var/log/sim:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+
+  neo4j:
+    image: neo4j:latest
+    ports: 
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
 
 
-networks:
-  sre-network:
-    driver: bridge
+volumes:
+  loki_data:
+  neo4j_data:
