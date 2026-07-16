@@ -69,7 +69,10 @@ class IncidentResponse(BaseModel):
     severity: Optional[str] = None
     alert_name: Optional[str] = None
     runbook_id: Optional[str] = None
-    created_at: Optional[str] = None
+    alert_started_at: Optional[str] = None
+    agent_invoked_at: Optional[str] = None
+    action_executed_at: Optional[str] = None
+    verified_at: Optional[str] = None
     source: Optional[str] = None
     team: Optional[str] = None
     root_cause: Optional[str] = None
@@ -79,10 +82,10 @@ class IncidentResponse(BaseModel):
     diagnosis_mode: Optional[str] = None
     action_plan: Optional[List[Dict]] = None
     required_approval: Optional[bool] = None
-    mttr_seconds: Optional[int] = None
+    business_mttr_seconds: Optional[int] = None
+    agent_mttr_seconds: Optional[int] = None
     total_tokens_used: Optional[int] = None
     token_cost_usd: Optional[float] = None
-    resolved_at: Optional[str] = None
     war_room_summary: Optional[Union[str, List[str]]] = None
     status_page_update: Optional[str] = None
     escalation_message: Optional[str] = None
