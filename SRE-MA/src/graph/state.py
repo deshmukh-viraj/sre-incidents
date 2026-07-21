@@ -4,6 +4,7 @@ every agent reads and writes to this.
 this is the only way they share data.
 """
 
+import os
 from typing import TypedDict, List, Optional, Dict, Any
 from enum import Enum
 
@@ -26,6 +27,17 @@ class ResolutionStatus(str, Enum):
     ESCALATED = "escalated"
     FAILED = "failed"
 
+class ResolutionCause(str, Enum):
+    AGENT_REMEDIATED = "agent_remediated"
+    NATURAL_CALM = "natural_calm"
+    HUMAN_REMEDIATED = "human_remediated"
+    EXTERNAL_REMEDIATED = "external_remediated"
+    AMBIGUOUS = "ambiguous"
+    ACTION_FAILED = "action_failed"
+
+class AttributionStatus(str, Enum):
+    PROVISIONAL = "provisional"
+    FINAL = "final"
 
 class Hypothesis(TypedDict):
     hypothesis:str           # plain-English root cause theory
@@ -46,7 +58,7 @@ class ActionItem(TypedDict):
     result: Optional[str]
 
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     #identity 
     incident_id:  str
     active_scenario: Optional[str]   # ground-truth label from simulator
@@ -103,9 +115,20 @@ class AgentState(TypedDict):
     verified_at: Optional[str]   
 
     #Error handling
-    errors: List[str]       # non fatal errors encountered
+    errors: List[str]      
     final_p99_latency_s: Optional[float]
     error_rate: Optional[float]
+
+    #attribution (5 gate test)
+    agent_identity: str
+    claim_id: str
+    t_claim: Optional[str]
+    execution_evidence: List[Dict[str, Any]]
+    t_clear: Optional[str]
+    verification_evidence: Optional[Dict[str, Any]]
+    resolution_cause: Optional[str]
+    attribution_status: Optional[str]
+    recurrence_of: Optional[str]
 
 
 def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
@@ -164,4 +187,14 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         blast_analysis=None,
         final_p99_latency_s = None,
         error_rate = None,
+
+        agent_identity=os.getenv("AGENT_IDENTITY", "sre-agent-a1"),
+        claim_id=None,
+        t_claim=None,
+        execution_evidence=[],
+        t_clear=None,
+        verification_evidence=None,
+        resolution_cause=None,
+        attribution_status=None,
+        recurrence_of=None,
     )
