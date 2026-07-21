@@ -50,7 +50,7 @@ def remediator_node(state: AgentState) -> dict:
 
     # path C: safe fallback based on severity + signal pattern
     else:
-        print("[remediator] Path C — safe mitigation")
+        print("[remediator] Path C -> safe mitigation")
         action_plan = _build_safe_mitigation(state)
 
     #safety layer: fill blast_radius / approval if not already set by Path A
@@ -72,12 +72,13 @@ def remediator_node(state: AgentState) -> dict:
 def _build_action_plan(runbook_id: str, state: AgentState) -> list:
     """load action plan from json."""
     raw = state.get("raw_signals", {})
-    plans_path = os.path.join(os.path.dirname(__file__), "..", "runbooks", "runbooks.json")
+    plans_path = os.path.join(os.path.dirname(__file__), "..", "..", "runbooks", "runbooks.json")
     
     try:
         with open(plans_path, "r") as f:
             plans = json.load(f)
     except FileNotFoundError:
+        print(f"[remediator] WARNING: runbooks.json not found at {plans_path} falling back to safe actions")
         plans = {}
 
     plan = plans.get(runbook_id)
