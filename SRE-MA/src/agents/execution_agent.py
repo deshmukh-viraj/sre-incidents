@@ -1,13 +1,13 @@
 """
 agents/execution_agent.py
 --------------------------
-Execution agents: human approval gate and action executor.
+execution agents: human approval gate and action executor.
 
-    human_gate_node  — Node 6: pauses workflow; waits for /approve call in production.
-                       In simulation mode (SIM_AUTO_APPROVE=true) auto-approves after timeout.
-    execute_node     — Node 7: runs each action in the plan, appends incident to KG.
+    human_gate_node— node 6: pauses workflow; waits for /approve call in production.
+                       in simulation mode (SIM_AUTO_APPROVE=true) auto-approves after timeout.
+    execute_node— node 7: runs each action in the plan, appends incident to KG.
 
-Writes to state:
+writes to state:
     human_approved, approval_timeout (human_gate)
     action_plan, resolution_status, resolved_at, mttr_seconds, resolution_notes (execute)
 """
@@ -18,7 +18,8 @@ import time
 
 from langgraph.types import interrupt
 from src.graph.state import AgentState, ResolutionStatus
-from src.tools.sre_tool import execute_remediation, notify_slack
+from src.tools.sre_tool import execute_remediation, notify_slack, check_alert_status
+from src.tools.prometheus_tool import collect_incident_signals
 from src.tools.kg_tool import append_past_incident
 
 
@@ -45,9 +46,9 @@ def human_gate_node(state: AgentState) -> dict:
     actions_text = ""
     for a in state.get("action_plan", []):
         if a.get("requires_approval"):
-            actions_text += f"- {a['action']}\n"
+            actions_text += f" {a['action']}\n"
 
-    # Send a detailed Slack message to ask for approval
+    #send a detailed slack message to ask for approval
     message = (
         f" *Approval Required for {incident_id}*\n"
         f"*Alert*: {state.get('alert_name', 'Unknown')}\n"
@@ -69,33 +70,87 @@ def human_gate_node(state: AgentState) -> dict:
 
     }
 
-def _verify_recovery(service: str, metric_name: str = "p99_latency_s",
-                     threshold: float = 5.0, timeout: int = 15, polls: int = 3) -> bool:
+def _verify_recovery(
+    alert_name: str,
+    service: str, 
+    pre_metrics: dict,
+    grace_period: int = 30,
+    polls: int = 5,
+    interval: int = 15,
+    )-> bool:
     """
-    poll prometheus a few times to make sure things are actually getting better.
-    returns true only if ALL polls show metric below threshold (sustained recovery).
+    verifies a fix actually worked using a fast, two step check to prevent false esclation.
+    1. check the real data(primary): compare prometheus metrics (p99 latency, error rate) before/after.
+    2. check the alert state(secondary): accept it if alertmanager already resolved
+
+    why: the alertmanager approach only checked alerts, which are slow to update and caused false escalations
+    even when the underlying fix worked.
     """
     from src.tools.prometheus_tool import collect_incident_signals
+    from src.graph.routing import P99_LATENCY_WARNING, ERROR_RATE_WARNING, P99_LATENCY_RECOVERY
 
-    interval = max(1, timeout // polls)
-    good = 0
+    pre_p99 = pre_metrics.get("p99_latency_s")
+    pre_error = pre_metrics.get("error_rate")
+
+    print(f"[execute] waiting {grace_period}s grace period for action to propagate...")
+    time.sleep(grace_period)
+
     for i in range(polls):
-        time.sleep(interval)
-        try:
-            signals = collect_incident_signals(service)
-            current = signals.get(metric_name)
-            if current is not None and current < threshold:
-                good += 1
-                print(f"[execute] Verification poll {i+1}/{polls}: {metric_name}={current:.3f} < {threshold}")
+        print(f"[execute] verification poll {i+1}/{polls}:")
+
+        #secondary: quick alertmanager check
+        am_state = check_alert_status(alert_name)
+        if am_state not in ("firing", "unknown"):
+            print(f"[execute] Alert explicitly resolved in Alertmanager")
+            signals = collect_incident_signals(service, window="1m")
+            curr_p99 = signals.get("p99_latency_s")
+            curr_error = signals.get("error_rate")
+            return True, curr_p99, curr_error
+
+        #primary: prometheus metric comparison 
+        print(f"[execute] Checking prometheus metrics for {service}...")
+        signals = collect_incident_signals(service, window="1m")
+        curr_p99 = signals.get("p99_latency_s")
+        curr_error = signals.get("error_rate")
+       
+
+        # check if p99 latency improved (dropped below warning threshold OR improved by >50%)
+        p99_ok = False
+        if curr_p99 is not None:
+            if curr_p99 < P99_LATENCY_RECOVERY:
+                p99_ok = True
+                print(f"[execute] p99={curr_p99:.3f}s < {P99_LATENCY_RECOVERY}s threshold")
+            elif pre_p99 is not None and curr_p99 < pre_p99 * 0.5:
+                p99_ok = True
+                print(f"[execute] p99 improved {pre_p99:.3f}s -> {curr_p99:.3f}s")
             else:
-                print(f"[execute] Verification poll {i+1}/{polls}: {metric_name}={current:.3f} >= {threshold}")
-        except Exception as e:
-            print(f"[execute] Verification poll {i+1}/{polls} failed: {e}")
-    return good == polls
+                print(f"[execute] p99={curr_p99:.3f}s still elevated (pre={pre_p99}s, threshold={P99_LATENCY_RECOVERY}s)")
+
+        # check if error rate improved
+        error_ok = False
+        if curr_error is not None:
+            if curr_error < ERROR_RATE_WARNING:
+                error_ok = True
+                print(f"[execute] error_rate={curr_error:.4f} < {ERROR_RATE_WARNING} threshold")
+            elif pre_error is not None and curr_error < pre_error * 0.5:
+                error_ok = True
+                print(f"[execute] error_rate improved {pre_error:.4f} ->{curr_error:.4f} ")
+            else:
+                print(f"[execute] error_rate={curr_error:.4f} still elevated (pre={pre_error}, threshold={ERROR_RATE_WARNING})")
+
+        # if either key metric recovered, count it as verified
+        if p99_ok or error_ok:
+            print(f"[execute] Prometheus metrics confirm recovery (p99_ok={p99_ok}, error_ok={error_ok})")
+            return True, curr_p99, curr_error
+
+        print(f"[execute] Metrics not yet recovered. Waiting {interval}s before next poll...")
+        time.sleep(interval)
+
+    print(f"[execute] Exhausted {polls} polls — metrics did not recover")
+    return False, curr_p99, curr_error
 
 
 # node 7: execute
-
 def execute_node(state: AgentState) -> dict:
     """
     run the action plan here.
@@ -105,11 +160,18 @@ def execute_node(state: AgentState) -> dict:
     print(f"\n[execute] Executing action plan for {state['incident_id']}")
 
     action_plan = state.get("action_plan", [])
-    start_ts = datetime.datetime.fromisoformat(state["started_at"])
-    mttr = int((datetime.datetime.utcnow() - start_ts).total_seconds())
+    start_ts = datetime.datetime.fromisoformat(state["alert_started_at"].replace("Z", "+00:00")).replace(tzinfo=None)
+    invoked_ts = datetime.datetime.fromisoformat(state["agent_invoked_at"].replace("Z", "+00:00")).replace(tzinfo=None)
     approved_by = state.get("approved_by")
     all_success = True
     updated_plan = []
+
+    # extract service name from state for post-remediation metric checks
+    service = (state.get("affected_services") or ["payment_gateway"])[0]
+
+    # snapshot pre-remediation metrics so we can compare after
+    pre_metrics = state.get("raw_signals", {})
+    print(f"[execute] Pre-remediation snapshot: p99={pre_metrics.get('p99_latency_s')}, error_rate={pre_metrics.get('error_rate')}")
 
     for action in action_plan:
         result = execute_remediation(
@@ -126,40 +188,62 @@ def execute_node(state: AgentState) -> dict:
             "result": result.get("result") or result.get("error"),
         })
 
-    # post execution verification: confirm the metric actually improved
-    service = state.get("raw_signals", {}).get("service", "payment_gateway")
-    verified = False
-    if all_success:
-        print(f"[execute] Verifying recovery for {service}...")
-        verified = _verify_recovery(service)
+    action_executed_at = datetime.datetime.utcnow()
+    action_executed_at_iso = action_executed_at.isoformat()
+    agent_mttr = int((action_executed_at - invoked_ts).total_seconds())
 
+    # post execution verification: confirm the metric actually improved
+    alert_name = state.get("alert_name", "unknown")
+    verified = False
+    verified_at_iso = None
+    business_mttr = None
+    final_p99 = None
+    final_error = None
+
+    if all_success:
+        print(f"[execute] Verifying recovery for {alert_name} (service={service})...")
+        verified, final_p99, final_error = _verify_recovery(
+            alert_name=alert_name,
+            service=service,
+            pre_metrics=pre_metrics,
+        )
+        if verified:
+            verified_at = datetime.datetime.utcnow()
+            verified_at_iso = verified_at.isoformat()
+            business_mttr = int((verified_at - start_ts).total_seconds())
+    
     # record outcome in knowledge graph for future incident correlation
     append_past_incident(
         incident_id = state["incident_id"],
         alert_name = state.get("alert_name", "unknown"),
+        service = service,
         root_cause = state.get("root_cause") or "unknown",
         action_taken = "; ".join(a["action"] for a in action_plan),
-        mttr_seconds = mttr,
+        business_mttr_seconds = business_mttr,
         success = all_success and verified,
     )
 
     if all_success and verified:
         status = ResolutionStatus.RESOLVED.value
-        print(f"[execute] Done: MTTR={mttr}s  success=True  verified=True")
+        print(f"[execute] Done: Business MTTR={business_mttr}s Agent MTTR={agent_mttr}s success=True  verified=True")
     elif all_success:
         status = ResolutionStatus.EXECUTED_UNVERIFIED.value
-        print(f"[execute] Done: MTTR={mttr}s  success=True  verified=False — metric did not improve")
+        print(f"[execute] Done: Agent MTTR={agent_mttr}s  success=True  verified=False — metric did not improve")
     else:
         status = ResolutionStatus.FAILED.value
-        print(f"[execute] Done: MTTR={mttr}s  success=False")
+        print(f"[execute] Done: Agent MTTR={agent_mttr}s  success=False")
 
     return {
         "action_plan": updated_plan,
         "action_taken": "; ".join(a["action"] for a in action_plan),
         "resolution_status": status,
         "verified": verified,
-        "resolved_at": datetime.datetime.utcnow().isoformat(),
-        "mttr_seconds":  mttr,
-        "resolution_notes":  f"{len(action_plan)} action(s) executed. MTTR: {mttr}s. Verified: {verified}",
+        "action_executed_at": action_executed_at_iso,
+        "verified_at": verified_at_iso,
+        "business_mttr_seconds": business_mttr,
+        "agent_mttr_seconds": agent_mttr,
+        "final_p99_latency_s": final_p99,
+        "error_rate": final_error,
+        "resolution_notes": f"{len(action_plan)} action(s) executed. Business MTTR: {business_mttr}s, Agent MTTR: {agent_mttr}s. Verified: {verified}",
     }
 
