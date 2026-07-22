@@ -31,7 +31,7 @@ templates:
 # Routing tree
 route:
   group_by: ['alertname', 'service']
-  group_wait: 5s            # wait 5s before sending first notification
+  group_wait: 10s       # wait 10s before sending first notification
   group_interval: 1m        # wait 1m before sending new alerts for existing group
   repeat_interval: 5m       # re-notify every 1m while still firing
   receiver: 'webhook-default'
