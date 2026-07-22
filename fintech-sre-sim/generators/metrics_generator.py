@@ -390,6 +390,17 @@ def _emit_infrastructure_metrics():
         process_cpu_seconds_total.labels(service=svc).inc(noise(0.1, 0.1))
 
 
+def _emit_compliance_metrics():
+    """Emit compliance events based on scenario."""
+    if SCENARIO.active_scenario == "compliance_audit_event":
+        if random.random() < 0.1:
+            compliance_events_total.labels(
+                regulation="PCI-DSS",
+                event_type="data_access_audit",
+                severity="info"
+            ).inc()
+
+
 # Main generation loop
 
 class MetricsGenerator:
@@ -418,6 +429,7 @@ class MetricsGenerator:
             _emit_payment_metrics()
             _emit_circuit_breaker_metrics()
             _emit_infrastructure_metrics()
+            _emit_compliance_metrics()
             time.sleep(self.tick_interval)
 
 
