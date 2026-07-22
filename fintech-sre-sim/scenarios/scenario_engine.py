@@ -233,7 +233,7 @@ SCENARIO_COMPLIANCE_AUDIT = Scenario(
         ),
         ScenarioPhase(
             name="evidence_collection",
-            duration_seconds=180,
+            duration_seconds=-1,
             rps_multiplier={"account_ledger": 1.3},  # log queries
         ),
         ScenarioPhase(name="audit_complete", duration_seconds=30),
