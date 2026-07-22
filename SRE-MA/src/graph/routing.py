@@ -12,7 +12,6 @@ from src.graph.state import AgentState, Severity
 
 
 #thresholds
-
 P99_LATENCY_CRITICAL= 3.0    # seconds — SEV1
 P99_LATENCY_WARNING = 1.5  # seconds — SEV2/3
 P99_LATENCY_RECOVERY = 0.5   
@@ -28,6 +27,26 @@ DIAGNOSIS_CONFIDENCE = 0.70    # below this -> LLM fallback
 MAX_DIAGNOSIS_LOOPS = 3       # prevent infinite re-diagnosis
 
 
+#per action class temporal windows (gate 3)
+# a single hardcoded grace_period=30 for every action type, as exists today, is not defensible: 
+# a feature-flag flip and a full rollback do not propagate at the same speed
+DELTA_EFFECT_SECONDS = {
+    "set_feature_flag": 60,
+    "rollback_deployment": 120,
+    "rolling_restart": 90,
+    "capture_diagnostics": 15,
+    "notify": 5,
+    "execute_kg_suggestion": 45,
+}
+
+#stability windows (gate 5)
+#stability windows determine how long we wait after an action before trusting metrics again
+T_STABLE_SECONDS = {
+    Severity.SEV1.value: 300,
+    Severity.SEV2.value: 600,
+    Severity.SEV3.value: 1800,
+
+}
 #Severity classification (after detector collects signals)
 
 def classify_severity(state: AgentState) -> str:
