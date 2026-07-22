@@ -64,17 +64,22 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
 
                 # 4. past incidents
                 if alert_name:
-                    past_q = "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) WHERE p.success = true RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, p.business_mttr_seconds AS business_mttr_seconds, p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
-                    past_result = session.run(past_q, alert_name=alert_name)
+                    past_q =( 
+                    "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) "
+                    "WHERE p.success = true AND p.service = $service "
+                    "RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, "
+                    "p.business_mttr_seconds AS business_mttr_seconds, "
+                    "p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
+                    )
+                    past_result = session.run(past_q, alert_name=alert_name, service=service)
                 else:
                     past_q = "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert)-[:AFFECTS]->(s:Service {name: $service}) WHERE p.success = true RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, p.business_mttr_seconds AS business_mttr_seconds, p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
                     past_result = session.run(past_q, service=service)
                 
-                records = [dict(r) for r in past_result]
-                if not records:
-                    return "no past incidents found for this alert"
-                past = records[0]
-                context_sections.append(f"[Past Incident] Similar incident on {service}: root_cause='{past['root_cause']}', fixed_by='{past['action_taken']}', mttr={past['business_mttr_seconds']}s, success={past['success']}.")
+                records = [dict(r) for r in past_result]    
+                if records:
+                    past = records[0]
+                    context_sections.append(f"[Past Incident] Similar incident on {service}: root_cause='{past['root_cause']}', fixed_by='{past['action_taken']}', mttr={past['business_mttr_seconds']}s, success={past['success']}.")
 
     except Exception as e:
         return f"knowledge graph query failed: {str(e)}"
@@ -85,20 +90,112 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
     return "\n\n".join(context_sections)
 
 
-def append_past_incident(incident_id: str, alert_name: str, root_cause: str, action_taken: str, business_mttr_seconds: int, success: bool) -> None:
+def append_past_incident(
+    incident_id: str,
+    alert_name: str,
+    service: str,
+    root_cause: str,
+    action_taken: str,
+    business_mttr_seconds: Optional[int],
+    success: bool,
+    resolution_cause: Optional[str] = None,
+    verified_at: Optional[str] = None,
+    severity: Optional[str] = None,
+) -> None:
     if driver is None:
         print("[kg_tool] cannot append incident — Neo4j unavailable")
         return
     try:
         with driver.session() as session:
             session.run(
-                "CREATE (p:PastIncident { incident_id: $incident_id, root_cause: $root_cause, action_taken: $action_taken, business_mttr_seconds: $business_mttr_seconds, success: $success, timestamp: datetime() })",
-                incident_id=incident_id, root_cause=root_cause, action_taken=action_taken, business_mttr_seconds=business_mttr_seconds, success=success,
+                "CREATE (p:PastIncident { "
+                "incident_id: $incident_id, alert_name: $alert_name, service: $service, "
+                "root_cause: $root_cause, action_taken: $action_taken, "
+                "business_mttr_seconds: $business_mttr_seconds, success: $success, "
+                "resolution_cause: $resolution_cause, verified_at: $verified_at, "
+                "severity: $severity, timestamp: datetime() })",
+                incident_id=incident_id, alert_name=alert_name, service=service,
+                root_cause=root_cause, action_taken=action_taken,
+                business_mttr_seconds=business_mttr_seconds, success=success,
+                resolution_cause=resolution_cause, verified_at=verified_at,
+                severity=severity,
             )
             session.run(
-                "MATCH (p:PastIncident {incident_id: $incident_id}), (a:Alert {name: $alert_name}) CREATE (p)-[:TRIGGERED_BY]->(a)",
+                "MERGE (a:Alert {name: $alert_name}) "
+                "WITH a " 
+                "MATCH (p:PastIncident {incident_id: $incident_id}) " 
+                "MERGE (p)-[:TRIGGERED_BY]->(a) ",
                 incident_id=incident_id, alert_name=alert_name,
             )
-            print(f"[kg_tool] PastIncident {incident_id} appended to KG")
+            print(f"[kg_tool] PastIncident {alert_name} appended to KG")
     except Exception as e:
         print(f"[kg_tool] Failed to append PastIncident: {e}")
+
+
+def query_past_incident_only(service: str, alert_name: str) -> Optional[dict]:
+    """
+    return only the root_cause and action_taken of the most recent successful
+    """
+    if driver is None: return None
+    try:
+        with driver.session() as session:
+            result = session.run(
+                "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) "
+                "WHERE p.service = $service AND p.success = true "
+                "RETURN p.root_cause AS root_cause, p.action_taken AS action_taken "
+                "ORDER BY p.timestamp DESC LIMIT 1",
+                service=service, alert_name=alert_name,
+            )
+            records = [dict(r) for r in result]
+            return records[0] if records else None
+    except Exception as e:
+        print(f"[kg_tool] query_past_incident_only failed for alert {alert_name} on {service}: {e}")
+        return None
+    
+
+def query_recent_resolved_incident(alert_name: str, service: str) -> Optional[dict]:
+    """
+    gate-5: finds if this alert was recently solved as agent_remediated
+    """
+    if driver is None: return None
+    try:
+        with driver.session() as session:
+            result = session.run(
+                "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) "
+                "WHERE p.service = $service AND p.resolution_cause = 'agent_remediated' "
+                "RETURN p.incident_id AS incident_id, p.severity AS severity, "
+                "p.verified_at AS verified_at ORDER BY p.timestamp DESC LIMIT 1",
+                alert_name=alert_name, service=service,
+            )
+            records = [dict(r) for r in result]
+            return records[0] if records else None
+    except Exception as e:
+        print(f"[kg_tool] query_recent_resolved_incident failed for alert {alert_name} on {service}: {e}")
+        return None
+
+
+def revoke_credit(incident_id: str, new_incident_id: str) -> None:
+    """
+    gate-5: atomically revokes the credit for old inicident and links new one asrecurrence
+    """
+    if driver is None: return 
+    tx = None
+    try:
+        with driver.session() as session:
+            tx = session.begin_transaction()
+            tx.run(
+                "MATCH (p:PastIncident {incident_id: $incident_id}) "
+                "SET p.resolution_cause = 'natural_calm', p.attribution_status = 'final', p.credit_revoked = true",
+                incident_id=incident_id,
+            )
+            tx.run(
+                "MATCH (new:PastIncident {incident_id: $new_incident_id}) "
+                "SET new.recurrence_of = $incident_id",
+                new_incident_id=new_incident_id, incident_id=incident_id,
+            )
+            tx.commit()
+            print(f"[kg_tool] credit revoked for {incident_id}, linked to {new_incident_id}")
+    except Exception as e:
+        if tx: tx.rollback()
+        print(f"[kg_tool] revoke_credit failed: {e}")
+        raise

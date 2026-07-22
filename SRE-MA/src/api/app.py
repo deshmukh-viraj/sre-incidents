@@ -266,6 +266,25 @@ async def alertmanager_webhook(
         alert_name = labels.get('alertname', 'unknown-alert')
         service = labels.get('service', 'unknown-service')
 
+        # 5-gate logic
+        from src.graph.routing import T_STABLE_SECONDS
+        from src.tools.kg_tool import query_recent_resolved_incident, revoke_credit
+        import datetime as dt 
+
+        recent = query_recent_resolved_incident(alert_name, service)
+        if recent:
+            verified_at = recent.get("verified_at")
+            if verified_at:
+                #parse timestamp
+                elapsed = (dt.datetime.utcnow() - dt.datetime.fromisoformat(verified_at.replace("Z", "+00.00")).replace(tzinfo=None)).total_seconds()
+                stable_window = T_STABLE_SECONDS.get(recent.get("severity", "SEV2"), 900)
+
+                if elapsed < stable_window:
+                    # generate the new incident id first so we can link it
+                    new_incident_id_temp = f"INC-{alert_name[:6]}-{uuid.uuid4().hex[:4].upper()}"
+                    revoke_credit(recent["incident_id"], new_incident_id_temp)
+                    print(f"[api] GATE-5: Revoked credit for {recent['incident_id']} due to refire")
+                    
         #create alert key
         alert_key = service
         
