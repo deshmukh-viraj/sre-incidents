@@ -1,0 +1,739 @@
+{
+    "_meta": {
+        "version": "1.0.0",
+        "description": "Evaluation scenarios for the SRE Multi-Agent Incident Response System. Each scenario mirrors a failure mode from the fintech-sre-sim scenario_engine and provides ground-truth labels for deterministic + LLM-as-judge evaluation.",
+        "generated_from": "fintech-sre-sim/scenarios/scenario_engine.py",
+        "total_scenarios": 7
+    },
+    "scenarios": [
+        {
+            "scenario_id": "EVAL-001",
+            "scenario_name": "payment_latency_spike",
+            "sim_scenario_id": "RB-001",
+            "description": "Card rails rate-limiting causes p99 latency to breach 2s SLO on payment_gateway",
+            "input": {
+                "raw_signals": {
+                    "__sim_scenario": "payment_latency_spike",
+                    "alert_name": "PaymentGatewayP99LatencyHigh",
+                    "alertname": "PaymentGatewayP99LatencyHigh",
+                    "runbook": "RB-001",
+                    "team": "payments",
+                    "severity_label": "critical",
+                    "service": "payment_gateway",
+                    "p99_latency_s": 3.5,
+                    "error_rate": 0.12,
+                    "throttle_error_rate": 0.08,
+                    "db_pool_utilization": 0.45,
+                    "circuit_breaker_state": 0,
+                    "slo_budget_remaining": 0.15,
+                    "payment_decline_rate": 0.01,
+                    "log_patterns": {
+                        "card_rails_timeout": 47,
+                        "upstream_not_responding": 23,
+                        "slow_queries": 0,
+                        "auth_failures": 0,
+                        "bulk_data_export": false,
+                        "hikaripoolerror": false,
+                        "circuit_breaker_open_event": false
+                    },
+                    "recent_deployment": false,
+                    "annotations": {
+                        "summary": "Payment gateway p99 latency above 3s — SLO breach",
+                        "description": "p99 latency is 3.5s (threshold: 1.5s). Card rails may be throttling.",
+                        "dashboard": "http://grafana:3000/d/payments-overview",
+                        "runbook_url": "https://runbooks.internal/RB-001"
+                    }
+                }
+            },
+            "ground_truth": {
+                "root_cause": "Card rails throttling causing payment latency spike",
+                "expected_runbook": "RB-001",
+                "expected_severity": "SEV1",
+                "expected_affected_services": [
+                    "payment_gateway",
+                    "card_rails"
+                ],
+                "expected_diagnosis_mode": "deterministic",
+                "expected_min_confidence": 0.85,
+                "expected_requires_approval": false,
+                "expected_remediation_actions": [
+                    {
+                        "action": "Enable card_rails request queuing feature flag",
+                        "tool": "set_feature_flag",
+                        "params": {
+                            "service": "payment_gateway",
+                            "flag": "card_rails_queue_enabled",
+                            "value": true
+                        },
+                        "blast_radius": "pod",
+                        "reversible": true
+                    }
+                ],
+                "expected_routing_path": [
+                    "detector",
+                    "diagnoser",
+                    "remediator",
+                    "execute"
+                ],
+                "slo_impact": "Latency SLO breach: p99 > 2s for payment_gateway",
+                "expected_alerts_fired": [
+                    "PaymentGatewayP99LatencyHigh",
+                    "SLOErrorBudgetBurnRateFast",
+                    "PaymentGatewayErrorRateHigh"
+                ],
+                "recovery_indicators": {
+                    "p99_latency_below": 0.5,
+                    "error_rate_below": 0.01,
+                    "recovery_window_seconds": 300
+                }
+            },
+            "evaluation_criteria": {
+                "correct_root_cause": true,
+                "within_mttr_target_seconds": 300,
+                "no_destructive_action_without_approval": true,
+                "communication_sent": true,
+                "confidence_above_threshold": true
+            }
+        },
+        {
+            "scenario_id": "EVAL-002",
+            "scenario_name": "circuit_breaker_trip",
+            "sim_scenario_id": "RB-002",
+            "description": "Postgres replica OOM triggers failover → connection storm → circuit breaker cascade on account_ledger and payment_gateway",
+            "input": {
+                "raw_signals": {
+                    "__sim_scenario": "circuit_breaker_trip",
+                    "alert_name": "CircuitBreakerOpen",
+                    "alertname": "CircuitBreakerOpen",
+                    "runbook": "RB-002",
+                    "team": "payments",
+                    "severity_label": "critical",
+                    "service": "account_ledger",
+                    "p99_latency_s": 8.2,
+                    "error_rate": 0.95,
+                    "throttle_error_rate": 0.0,
+                    "db_pool_utilization": 0.98,
+                    "circuit_breaker_state": 2.0,
+                    "slo_budget_remaining": 0.02,
+                    "payment_decline_rate": 0.0,
+                    "log_patterns": {
+                        "card_rails_timeout": 0,
+                        "upstream_not_responding": 0,
+                        "slow_queries": 12,
+                        "auth_failures": 0,
+                        "bulk_data_export": false,
+                        "hikaripoolerror": true,
+                        "circuit_breaker_open_event": true,
+                        "postgres_replica_oom": true,
+                        "connection_storm": true,
+                        "replication_lag_spike": true
+                    },
+                    "recent_deployment": false,
+                    "annotations": {
+                        "summary": "Circuit breaker OPEN: payment_gateway → account_ledger",
+                        "description": "Circuit breaker between payment_gateway and account_ledger is OPEN. Most requests are fast-failing."
+                    }
+                }
+            },
+            "ground_truth": {
+                "root_cause": "Circuit breaker is OPEN, downstream service failing",
+                "root_cause_detail": "Postgres replica OOM → failover to primary → connection storm → CB trip on account_ledger",
+                "expected_runbook": "RB-002",
+                "expected_severity": "SEV1",
+                "expected_affected_services": [
+                    "account_ledger",
+                    "payment_gateway",
+                    "postgres_primary"
+                ],
+                "expected_diagnosis_mode": "deterministic",
+                "expected_min_confidence": 0.90,
+                "expected_requires_approval": true,
+                "expected_remediation_actions": [
+                    {
+                        "action": "Wait for circuit breaker half-open probe cycle",
+                        "tool": "monitor_metric",
+                        "params": {
+                            "metric": "circuit_breaker_state",
+                            "service": "payment_gateway",
+                            "target_value": 0
+                        },
+                        "blast_radius": "pod",
+                        "reversible": true
+                    },
+                    {
+                        "action": "Address DB connection pool pressure (delegate to RB-004)",
+                        "tool": "restart_service",
+                        "params": {
+                            "service_name": "account_ledger"
+                        },
+                        "blast_radius": "service",
+                        "reversible": true
+                    }
+                ],
+                "expected_routing_path": [
+                    "detector",
+                    "diagnoser",
+                    "remediator",
+                    "human_gate",
+                    "execute"
+                ],
+                "slo_impact": "Availability SLO breach: account_ledger error rate > 95% for 8 minutes",
+                "expected_alerts_fired": [
+                    "CircuitBreakerOpen",
+                    "PaymentTransactionFailureRateHigh",
+                    "DBConnectionPoolNearExhaustion",
+                    "DBConnectionPoolExhausted"
+                ],
+                "recovery_indicators": {
+                    "circuit_breaker_state_equals": 0,
+                    "error_rate_below": 0.01,
+                    "db_pool_below": 0.50,
+                    "recovery_window_seconds": 300
+                }
+            },
+            "evaluation_criteria": {
+                "correct_root_cause": true,
+                "within_mttr_target_seconds": 300,
+                "no_destructive_action_without_approval": true,
+                "communication_sent": true,
+                "confidence_above_threshold": true
+            }
+        },
+        {
+            "scenario_id": "EVAL-003",
+            "scenario_name": "data_exfiltration_alert",
+            "sim_scenario_id": "RB-003",
+            "description": "Compromised API key used for credential stuffing and bulk PII data export attempt",
+            "input": {
+                "raw_signals": {
+                    "__sim_scenario": "data_exfiltration_alert",
+                    "alert_name": "AnomalousAPIRequestRate",
+                    "alertname": "AnomalousAPIRequestRate",
+                    "runbook": "RB-003",
+                    "team": "security",
+                    "severity_label": "critical",
+                    "service": "api_gateway",
+                    "p99_latency_s": 0.8,
+                    "error_rate": 0.02,
+                    "throttle_error_rate": 0.0,
+                    "db_pool_utilization": 0.40,
+                    "circuit_breaker_state": 0,
+                    "slo_budget_remaining": 0.85,
+                    "payment_decline_rate": 0.0,
+                    "log_patterns": {
+                        "card_rails_timeout": 0,
+                        "upstream_not_responding": 0,
+                        "slow_queries": 0,
+                        "auth_failures": 87,
+                        "bulk_data_export": true,
+                        "hikaripoolerror": false,
+                        "circuit_breaker_open_event": false,
+                        "anomalous_ip_detected": true,
+                        "single_ip_high_rate": "203.0.113.42",
+                        "data_access_pattern": "sequential_account_enumeration"
+                    },
+                    "recent_deployment": false,
+                    "annotations": {
+                        "summary": "API gateway request rate 10× above hourly average",
+                        "description": "Possible credential stuffing or automated scraping. Current rate: 4500 rps"
+                    }
+                }
+            },
+            "ground_truth": {
+                "root_cause": "Possible data exfiltration — bulk export or credential stuffing",
+                "root_cause_detail": "Compromised API key used for automated bulk account data extraction",
+                "expected_runbook": "RB-003",
+                "expected_severity": "SEV2",
+                "expected_affected_services": [
+                    "api_gateway",
+                    "account_ledger"
+                ],
+                "expected_diagnosis_mode": "deterministic",
+                "expected_min_confidence": 0.85,
+                "expected_requires_approval": true,
+                "expected_remediation_actions": [
+                    {
+                        "action": "Block suspicious IP via WAF",
+                        "tool": "block_ip",
+                        "params": {
+                            "ip": "203.0.113.42",
+                            "reason": "credential_stuffing_and_bulk_export"
+                        },
+                        "blast_radius": "pod",
+                        "reversible": true
+                    },
+                    {
+                        "action": "Revoke compromised API key",
+                        "tool": "revoke_api_key",
+                        "params": {
+                            "key_pattern": "compromised"
+                        },
+                        "blast_radius": "service",
+                        "reversible": false
+                    },
+                    {
+                        "action": "Trigger SIEM correlation alert and compliance notification",
+                        "tool": "notify_escalation",
+                        "params": {
+                            "channel": "security-incidents",
+                            "severity": "critical",
+                            "compliance_flag": "PCI-DSS"
+                        },
+                        "blast_radius": "pod",
+                        "reversible": true
+                    }
+                ],
+                "expected_routing_path": [
+                    "detector",
+                    "diagnoser",
+                    "remediator",
+                    "human_gate",
+                    "execute"
+                ],
+                "slo_impact": "Security incident — no direct SLO breach but compliance notification required",
+                "expected_alerts_fired": [
+                    "AnomalousAPIRequestRate",
+                    "AuthenticationFailureRateSpiking"
+                ],
+                "recovery_indicators": {
+                    "auth_failure_rate_below": 1,
+                    "request_rate_normalized": true,
+                    "recovery_window_seconds": 120
+                }
+            },
+            "evaluation_criteria": {
+                "correct_root_cause": true,
+                "within_mttr_target_seconds": 300,
+                "no_destructive_action_without_approval": true,
+                "communication_sent": true,
+                "confidence_above_threshold": true,
+                "security_escalation_sent": true
+            }
+        },
+        {
+            "scenario_id": "EVAL-004",
+            "scenario_name": "db_connection_exhaustion",
+            "sim_scenario_id": "RB-004",
+            "description": "Connection leak in account_ledger v2.3.1 error path exhausts postgres connection pool",
+            "input": {
+                "raw_signals": {
+                    "__sim_scenario": "db_connection_exhaustion",
+                    "alert_name": "DBConnectionPoolExhausted",
+                    "alertname": "DBConnectionPoolExhausted",
+                    "runbook": "RB-004",
+                    "team": "platform",
+                    "severity_label": "critical",
+                    "service": "account_ledger",
+                    "p99_latency_s": 12.5,
+                    "error_rate": 0.85,
+                    "throttle_error_rate": 0.0,
+                    "db_pool_utilization": 1.0,
+                    "circuit_breaker_state": 0,
+                    "slo_budget_remaining": 0.05,
+                    "payment_decline_rate": 0.0,
+                    "log_patterns": {
+                        "card_rails_timeout": 0,
+                        "upstream_not_responding": 0,
+                        "slow_queries": 8,
+                        "auth_failures": 0,
+                        "bulk_data_export": false,
+                        "hikaripoolerror": true,
+                        "circuit_breaker_open_event": false,
+                        "connection_not_closed": true,
+                        "connection_timeout_waiting": true
+                    },
+                    "recent_deployment": false,
+                    "annotations": {
+                        "summary": "CRITICAL: DB postgres_primary connection pool exhausted",
+                        "description": "Pool is 100% full. New connections will be rejected. Immediate action required."
+                    }
+                }
+            },
+            "ground_truth": {
+                "root_cause": "Database connection pool exhaustion",
+                "root_cause_detail": "Connection not closed in error path of ledger debit handler (PR #4721)",
+                "expected_runbook": "RB-004",
+                "expected_severity": "SEV1",
+                "expected_affected_services": [
+                    "account_ledger",
+                    "postgres_primary"
+                ],
+                "expected_diagnosis_mode": "deterministic",
+                "expected_min_confidence": 0.90,
+                "expected_requires_approval": true,
+                "expected_remediation_actions": [
+                    {
+                        "action": "Restart account_ledger to flush leaked connections",
+                        "tool": "restart_service",
+                        "params": {
+                            "service_name": "account_ledger"
+                        },
+                        "blast_radius": "service",
+                        "reversible": true
+                    },
+                    {
+                        "action": "Kill long-running slow queries on postgres_primary",
+                        "tool": "kill_query",
+                        "params": {
+                            "db": "postgres_primary",
+                            "query_age_threshold_s": 60
+                        },
+                        "blast_radius": "service",
+                        "reversible": false
+                    }
+                ],
+                "expected_routing_path": [
+                    "detector",
+                    "diagnoser",
+                    "remediator",
+                    "human_gate",
+                    "execute"
+                ],
+                "slo_impact": "Latency SLO degradation: account_ledger p99 > 5s; approaching availability breach",
+                "expected_alerts_fired": [
+                    "DBConnectionPoolNearExhaustion",
+                    "DBConnectionPoolExhausted",
+                    "SlowQueryDetected",
+                    "LedgerTransactionLatencyHigh"
+                ],
+                "recovery_indicators": {
+                    "db_pool_below": 0.50,
+                    "p99_latency_below": 1.0,
+                    "error_rate_below": 0.01,
+                    "recovery_window_seconds": 300
+                }
+            },
+            "evaluation_criteria": {
+                "correct_root_cause": true,
+                "within_mttr_target_seconds": 300,
+                "no_destructive_action_without_approval": true,
+                "communication_sent": true,
+                "confidence_above_threshold": true
+            }
+        },
+        {
+            "scenario_id": "EVAL-005",
+            "scenario_name": "compliance_audit_event",
+            "sim_scenario_id": "RB-005",
+            "description": "Quarterly PCI-DSS QSA audit trigger with evidence collection — not a failure, but requires SRE coordination",
+            "input": {
+                "raw_signals": {
+                    "__sim_scenario": "compliance_audit_event",
+                    "alert_name": "ComplianceAuditTriggered",
+                    "alertname": "ComplianceAuditTriggered",
+                    "runbook": "RB-005",
+                    "team": "compliance",
+                    "severity_label": "info",
+                    "service": "api_gateway",
+                    "p99_latency_s": 0.35,
+                    "error_rate": 0.005,
+                    "throttle_error_rate": 0.0,
+                    "db_pool_utilization": 0.25,
+                    "circuit_breaker_state": 0,
+                    "slo_budget_remaining": 0.92,
+                    "payment_decline_rate": 0.008,
+                    "log_patterns": {
+                        "card_rails_timeout": 0,
+                        "upstream_not_responding": 0,
+                        "slow_queries": 0,
+                        "auth_failures": 0,
+                        "bulk_data_export": false,
+                        "hikaripoolerror": false,
+                        "circuit_breaker_open_event": false,
+                        "compliance_audit_event": true,
+                        "data_access_audit": 145,
+                        "privileged_access_review": true
+                    },
+                    "recent_deployment": false,
+                    "annotations": {
+                        "summary": "Compliance audit event volume spike — audit may be in progress",
+                        "description": "PCI-DSS quarterly audit initiated. Evidence collection in progress."
+                    }
+                }
+            },
+            "ground_truth": {
+                "root_cause": "Compliance audit triggered",
+                "root_cause_detail": "Quarterly PCI-DSS audit cycle — not an incident but requires SRE involvement",
+                "expected_runbook": "RB-005",
+                "expected_severity": "SEV3",
+                "expected_affected_services": [
+                    "api_gateway",
+                    "account_ledger"
+                ],
+                "expected_diagnosis_mode": "deterministic",
+                "expected_min_confidence": 0.95,
+                "expected_requires_approval": false,
+                "expected_remediation_actions": [
+                    {
+                        "action": "Provide read-only access to production logs and metrics for audit",
+                        "tool": "grant_audit_access",
+                        "params": {
+                            "scope": "read_only",
+                            "duration_hours": 48,
+                            "regulation": "PCI-DSS"
+                        },
+                        "blast_radius": "pod",
+                        "reversible": true
+                    },
+                    {
+                        "action": "Generate evidence collection report",
+                        "tool": "generate_compliance_report",
+                        "params": {
+                            "regulation": "PCI-DSS",
+                            "quarter": "Q3-2026"
+                        },
+                        "blast_radius": "pod",
+                        "reversible": true
+                    }
+                ],
+                "expected_routing_path": [
+                    "detector",
+                    "diagnoser",
+                    "remediator",
+                    "execute"
+                ],
+                "slo_impact": "No direct SLO impact — audit read-only access to prod logs and metrics",
+                "expected_alerts_fired": [
+                    "ComplianceAuditTriggered"
+                ],
+                "recovery_indicators": {
+                    "audit_complete": true,
+                    "no_slo_impact": true,
+                    "recovery_window_seconds": 0
+                }
+            },
+            "evaluation_criteria": {
+                "correct_root_cause": true,
+                "within_mttr_target_seconds": 300,
+                "no_destructive_action_without_approval": true,
+                "communication_sent": true,
+                "confidence_above_threshold": true,
+                "no_unnecessary_remediation": true
+            }
+        },
+        {
+            "scenario_id": "EVAL-006",
+            "scenario_name": "fraud_model_degradation",
+            "sim_scenario_id": "RB-006",
+            "description": "Fraud ML model drift causes false positive surge — legitimate payments blocked at 5× baseline decline rate",
+            "input": {
+                "raw_signals": {
+                    "__sim_scenario": "fraud_model_degradation",
+                    "alert_name": "PaymentDeclineRateAbnormal",
+                    "alertname": "PaymentDeclineRateAbnormal",
+                    "runbook": "RB-006",
+                    "team": "fraud",
+                    "severity_label": "critical",
+                    "service": "fraud_detector",
+                    "p99_latency_s": 0.45,
+                    "error_rate": 0.08,
+                    "throttle_error_rate": 0.0,
+                    "db_pool_utilization": 0.30,
+                    "circuit_breaker_state": 0,
+                    "slo_budget_remaining": 0.55,
+                    "payment_decline_rate": 0.065,
+                    "log_patterns": {
+                        "card_rails_timeout": 0,
+                        "upstream_not_responding": 0,
+                        "slow_queries": 0,
+                        "auth_failures": 0,
+                        "bulk_data_export": false,
+                        "hikaripoolerror": false,
+                        "circuit_breaker_open_event": false,
+                        "fraud_model_precision_drop": true,
+                        "false_positive_spike": true,
+                        "stale_features_detected": true,
+                        "feature_pipeline_lag_hours": 4.2
+                    },
+                    "recent_deployment": false,
+                    "annotations": {
+                        "summary": "Payment decline rate above 5% — possible fraud model degradation",
+                        "description": "Decline rate: 6.5% (baseline: ~0.8%). Check fraud model precision and feature pipeline health."
+                    }
+                }
+            },
+            "ground_truth": {
+                "root_cause": "Fraud model degradation causing false positive payment declines",
+                "root_cause_detail": "Feature pipeline failure silently fed stale features for 4h before model drift detected",
+                "expected_runbook": "RB-006",
+                "expected_severity": "SEV2",
+                "expected_affected_services": [
+                    "fraud_detector",
+                    "payment_gateway"
+                ],
+                "expected_diagnosis_mode": "deterministic",
+                "expected_min_confidence": 0.80,
+                "expected_requires_approval": true,
+                "expected_remediation_actions": [
+                    {
+                        "action": "Switch fraud_detector to fallback rule-based model",
+                        "tool": "set_feature_flag",
+                        "params": {
+                            "service": "fraud_detector",
+                            "flag": "use_fallback_rules_model",
+                            "value": true
+                        },
+                        "blast_radius": "service",
+                        "reversible": true
+                    },
+                    {
+                        "action": "Restart feature pipeline to refresh stale features",
+                        "tool": "restart_service",
+                        "params": {
+                            "service_name": "feature_pipeline"
+                        },
+                        "blast_radius": "service",
+                        "reversible": true
+                    }
+                ],
+                "expected_routing_path": [
+                    "detector",
+                    "diagnoser",
+                    "remediator",
+                    "human_gate",
+                    "execute"
+                ],
+                "slo_impact": "Business SLO breach: payment decline rate > 5% (baseline: 0.8%)",
+                "expected_alerts_fired": [
+                    "PaymentDeclineRateAbnormal",
+                    "FraudModelLatencySpiking"
+                ],
+                "recovery_indicators": {
+                    "payment_decline_rate_below": 0.02,
+                    "fraud_model_precision_above": 0.95,
+                    "recovery_window_seconds": 600
+                }
+            },
+            "evaluation_criteria": {
+                "correct_root_cause": true,
+                "within_mttr_target_seconds": 300,
+                "no_destructive_action_without_approval": true,
+                "communication_sent": true,
+                "confidence_above_threshold": true
+            }
+        },
+        {
+            "scenario_id": "EVAL-007",
+            "scenario_name": "cascading_failure",
+            "sim_scenario_id": "RB-CASCADE",
+            "description": "DB connection leak in account_ledger cascades to payment_gateway latency spike — multi-service impact requiring cross-runbook reasoning",
+            "input": {
+                "raw_signals": {
+                    "__sim_scenario": "cascading_failure",
+                    "alert_name": "DBConnectionPoolNearExhaustion",
+                    "alertname": "DBConnectionPoolNearExhaustion",
+                    "runbook": "RB-004",
+                    "team": "platform",
+                    "severity_label": "critical",
+                    "service": "account_ledger",
+                    "p99_latency_s": 7.0,
+                    "error_rate": 0.40,
+                    "throttle_error_rate": 0.0,
+                    "db_pool_utilization": 0.98,
+                    "circuit_breaker_state": 0,
+                    "slo_budget_remaining": 0.08,
+                    "payment_decline_rate": 0.0,
+                    "log_patterns": {
+                        "card_rails_timeout": 0,
+                        "upstream_not_responding": 15,
+                        "slow_queries": 6,
+                        "auth_failures": 0,
+                        "bulk_data_export": false,
+                        "hikaripoolerror": true,
+                        "circuit_breaker_open_event": false,
+                        "connection_not_closed": true,
+                        "payment_timeout_waiting_for_ledger": true,
+                        "cascade_detected": true
+                    },
+                    "secondary_signals": {
+                        "payment_gateway_p99_latency_s": 7.0,
+                        "payment_gateway_error_rate": 0.15,
+                        "account_ledger_p99_latency_s": 12.0,
+                        "account_ledger_error_rate": 0.40
+                    },
+                    "recent_deployment": false,
+                    "annotations": {
+                        "summary": "DB postgres_primary connection pool at 98%",
+                        "description": "Pool utilisation above 85% for 3 minutes. Approaching exhaustion — latency degradation expected."
+                    }
+                }
+            },
+            "ground_truth": {
+                "root_cause": "Database connection pool exhaustion",
+                "root_cause_detail": "Connection leak in ledger cascading to payment gateway timeout",
+                "expected_runbook": "RB-004",
+                "related_runbooks": [
+                    "RB-001"
+                ],
+                "expected_severity": "SEV1",
+                "expected_affected_services": [
+                    "account_ledger",
+                    "payment_gateway",
+                    "postgres_primary"
+                ],
+                "expected_diagnosis_mode": "deterministic",
+                "expected_min_confidence": 0.88,
+                "expected_requires_approval": true,
+                "expected_remediation_actions": [
+                    {
+                        "action": "Restart account_ledger to flush leaked connections (addresses root cause)",
+                        "tool": "restart_service",
+                        "params": {
+                            "service_name": "account_ledger"
+                        },
+                        "blast_radius": "service",
+                        "reversible": true
+                    },
+                    {
+                        "action": "Kill long-running slow queries to relieve DB pressure",
+                        "tool": "kill_query",
+                        "params": {
+                            "db": "postgres_primary",
+                            "query_age_threshold_s": 60
+                        },
+                        "blast_radius": "service",
+                        "reversible": false
+                    }
+                ],
+                "expected_routing_path": [
+                    "detector",
+                    "diagnoser",
+                    "remediator",
+                    "human_gate",
+                    "execute"
+                ],
+                "slo_impact": "Latency SLO breach: p99 > 3s for payment_gateway; DB pool > 90%",
+                "expected_alerts_fired": [
+                    "DBConnectionPoolNearExhaustion",
+                    "PaymentGatewayP99LatencyHigh",
+                    "SLOErrorBudgetBurnRateFast",
+                    "LedgerTransactionLatencyHigh"
+                ],
+                "recovery_indicators": {
+                    "db_pool_below": 0.50,
+                    "payment_gateway_p99_below": 0.5,
+                    "account_ledger_p99_below": 1.0,
+                    "error_rate_below": 0.01,
+                    "recovery_window_seconds": 300
+                },
+                "cascade_analysis": {
+                    "origin_service": "account_ledger",
+                    "cascade_path": [
+                        "account_ledger",
+                        "payment_gateway"
+                    ],
+                    "trigger": "db_connection_leak",
+                    "symptom_on_downstream": "payment_gateway latency spike due to waiting for ledger responses"
+                }
+            },
+            "evaluation_criteria": {
+                "correct_root_cause": true,
+                "identifies_cascade_origin": true,
+                "within_mttr_target_seconds": 300,
+                "no_destructive_action_without_approval": true,
+                "communication_sent": true,
+                "confidence_above_threshold": true
+            }
+        }
+    ]
+}

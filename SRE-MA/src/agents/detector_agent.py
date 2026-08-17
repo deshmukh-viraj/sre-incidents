@@ -15,6 +15,7 @@ writes to state:
 from src.graph.state import AgentState, ResolutionStatus
 from src.graph.routing import classify_severity
 from src.tools.sre_tool import collect_all_signals
+from src.graph.routing import infer_service
 
 #node 1: detector
 
@@ -27,7 +28,7 @@ def detector_node(state: AgentState) -> dict:
     print(f"\n[detector] Starting detection for incident {state['incident_id']}")
 
     raw = state.get("raw_signals", {})
-    service = raw.get("service") or _infer_service(raw.get("alert_name", ""))
+    service = raw.get("service") or infer_service(raw.get("alert_name", ""))
 
     # collect Prometheus metrics and Loki log patterns
     signals = collect_all_signals(service)
@@ -41,34 +42,13 @@ def detector_node(state: AgentState) -> dict:
     print(f"[detector] Severity: {severity} | service: {service}")
     print(f"[detector] p99={raw.get('p99_latency_s')} error_rate={raw.get('error_rate')}")
 
+    is_shadow = bool(state.get("shadow_execution", False) or raw.get("shadow_execution", False))
+    raw["shadow_execution"] = is_shadow
+
     return {
         "raw_signals": raw,
         "severity": severity,
         "affected_services": [service],
         "resolution_status": ResolutionStatus.INVESTIGATING.value,
+        "shadow_execution": is_shadow,
     }
-
-
-#private helper
-def _infer_service(alert_name: str) -> str:
-    """guess the service based on alert name keywords"""
-    mapping = {
-        "PaymentGateway": "payment_gateway",
-        "SLOError": "payment_gateway",
-        "SLOBudget": "payment_gateway",
-        "PaymentDecline":"payment_gateway",
-        "PaymentTransaction": "payment_gateway",
-        "CircuitBreaker": "payment_gateway",
-        "DBConnection": "account_ledger",
-        "SlowQQuery": "account_ledger",
-        "Ledger": "account_ledger",
-        "ServiceMemory": "account_ledger",
-        "Anomalous": "api_gateway",
-        "Authentication": "api_gateway",
-        "Compliance": "api_gateway",
-        "FraudModel": "fraud_detector",
-    }
-    for keyword, svc in mapping.items():
-        if keyword.lower() in alert_name.lower():
-            return svc
-    return "payment_gateway"  # default

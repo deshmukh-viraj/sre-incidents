@@ -88,6 +88,7 @@ class AgentState(TypedDict, total=False):
     requires_approval: bool
     human_approved:bool
     approval_timeout:  bool
+    correlated_alerts: List[Dict[str, Any]]
 
     #communicator output
     status_page_update: Optional[str]    
@@ -127,9 +128,21 @@ class AgentState(TypedDict, total=False):
     t_clear: Optional[str]
     verification_evidence: Optional[Dict[str, Any]]
     resolution_cause: Optional[str]
-    attribution_status: Optional[str]
     recurrence_of: Optional[str]
 
+    t_clear_true: Optional[float]
+    t_clear_polled: Optional[str]
+    clear_source: Optional[str]
+    healthy_run_len: Optional[int]
+    samples_seen: Optional[int]
+    attribution_lead_seconds: Optional[float]
+    gate3_reason: Optional[str]
+    gate1_claim: Optional[bool]
+    gate2_target_bound: Optional[bool]
+    gate3_temporal: Optional[bool]
+    gate4_verified: Optional[bool]
+    gate5_stable: Optional[bool]
+    shadow_execution: bool
 
 def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
     """
@@ -146,6 +159,7 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         alert_name=raw_signals.get('alert_name') or raw_signals.get("alertname"),
         runbook_id=raw_signals.get('runbook'),
         team=raw_signals.get('team'),
+        correlated_alerts=[],
 
         incident_summary=None,
         severity=None,
@@ -195,6 +209,19 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         t_clear=None,
         verification_evidence=None,
         resolution_cause=None,
-        attribution_status=None,
         recurrence_of=None,
+
+        t_clear_true=None,
+        t_clear_polled=None,
+        clear_source=None,
+        attribution_lead_seconds=None,
+        gate3_reason=None,
+        gate1_claim=None,
+        gate2_target_bound=None,
+        gate3_temporal=None,
+        gate4_verified=None,
+        gate5_stable=None,
+        shadow_execution=bool(raw_signals.get("shadow_execution", False)),
+        healthy_run_len=None,
+        samples_seen=None
     )

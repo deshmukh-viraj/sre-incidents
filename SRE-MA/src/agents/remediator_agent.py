@@ -4,6 +4,7 @@ agents/remediator_agent.py
 remediator agent: builds and validates an action plan from the diagnosed root cause.
 """
 
+from typing import Optional
 import json
 import os
 from src.graph.state import AgentState
@@ -15,12 +16,19 @@ from src.graph.routing import classify_blast_radius, requires_human_approval
 def remediator_node(state: AgentState) -> dict:
     print(f"\n[remediator] Building action plan for {state['incident_id']}")
 
+    consensus_rb = _check_correlated_rb_consensus(state)
+    if state.get("correlated_alerts"):
+        if consensus_rb:
+            print(f"[remediator] Correlated runbook consensus achieved: {consensus_rb}")
+        else:
+            print(f"[remediator] Correlated alerts disagree on runbook")
+
     hypotheses = state.get("hypotheses", [])
     if not hypotheses:
         return {"action_plan": [], "requires_approval": False}
 
     best = max(hypotheses, key=lambda h:h.get("confidence", 0))
-    runbook = best.get("supporting_runbook") or state.get("runbook_id")
+    runbook = consensus_rb or state.get("runbook_id") or best.get("supporting_runbook")
     llm_action = state.get("llm_suggested_action")
 
     #path A: known resolution
@@ -145,3 +153,24 @@ def _build_safe_mitigation(state: AgentState) -> list:
         "executed": False,
         "result": None,
     }]
+
+def _check_correlated_rb_consensus(state: AgentState) -> Optional[str]:
+    """
+    if this incident has correlated alerts,,and they all share the same
+    runbook label, that a strong deterministric signal, one root cause, 
+    one fix, no need for extra reasoning
+    """
+    incident_id = state["incident_id"]
+    corr = state.get("correlated_alerts", [])
+    if not corr:
+        return state.get("runbook_id")
+    
+    rb_seen = {state.get("runbook_id")}
+    for entry in corr:
+        rb = entry.get("runbook_id")
+        if rb:
+            rb_seen.add(rb)
+    
+    if len(rb_seen) == 1:
+        return rb_seen.pop()
+    return None

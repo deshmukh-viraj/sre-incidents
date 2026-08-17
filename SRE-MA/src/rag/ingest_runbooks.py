@@ -16,7 +16,6 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 
 RUNBOOKS_DIR = Path(__file__).parent.parent.parent / "runbooks"
 FAISS_INDEX = Path(__file__).parent.parent / "data" / "faiss_index"

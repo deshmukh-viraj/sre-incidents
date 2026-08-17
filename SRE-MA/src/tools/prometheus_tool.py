@@ -36,24 +36,6 @@ def _instant_query(promql: str) -> Optional[float]:
         return None
 
 
-def _range_query(promql: str, duration: str = "5m") -> list:
-    """Execute a range query and return the raw result list."""
-    import time
-    end = int(time.time())
-    unit = duration[-1]
-    value = int(duration[:-1])
-    start = end - {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(unit, 60) * value
-    
-    try:
-        url = f"{PROMETHEUS_URL}/api/v1/query_range?{urllib.parse.urlencode({'query': promql, 'start': start, 'end': end, 'step': '15'})}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=15.0) as resp:
-            return json.loads(resp.read().decode()).get("data", {}).get("result", [])
-    except Exception as e:
-        print(f"[prometheus_tool] range query failed: {e}")
-        return []
-
-
 def collect_incident_signals(service: str, window: str = "5m") -> Dict[str, Any]:
     """
     grabs all the important metrics for a service in one go.

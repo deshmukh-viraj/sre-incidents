@@ -23,9 +23,13 @@ from src.tools.sre_tool import execute_remediation, notify_slack, check_alert_st
 from src.tools.prometheus_tool import collect_incident_signals
 from src.tools.kg_tool import append_past_incident
 
-from src.graph.attribution import classify_attribution
-from src.graph.routing import DELTA_EFFECT_SECONDS
+
+from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS
+from src.graph.clear_time import build_clear_evidence
+from src.graph.attribution_gates import evaluate_gate3, final_label
 from typing import Optional, Dict, Any, List
+
+
 
 @dataclass
 class VerificationResult:
@@ -181,6 +185,25 @@ def _verify_recovery(
         signal=None
     )
 
+def _signal_expr(service: str, signal: Optional[str]) -> tuple[str, float, str]:
+    """
+    maps the verification signal (which metric actually recovered) to the prometheus expression
+    threshold, comparison that gates3's range query needs to ask the same questiion against real history
+    """
+    if signal == "error_rate":
+        expr = (
+            f'sum(rate(http_requests_total{{service="{service}", status_code=~"5.."}}[1m])) '
+            f'/ sum(rate(https_requests_total{{service="{service}"}}[1m]))'
+        )
+        return expr, ERROR_RATE_WARNING, "below"
+    
+    expr = (
+        f'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket'
+        f'{{service="{service}"}}[1m])) by (le))'
+    )
+    return expr, P99_LATENCY_RECOVERY, "below"
+
+
 
 # node 7: execute
 def execute_node(state: AgentState) -> dict:
@@ -193,7 +216,7 @@ def execute_node(state: AgentState) -> dict:
 
     # gate-1: claim (capture the timestamp the moment the agent takes the wheel)
     t_claim = datetime.datetime.utcnow().isoformat()
-    claim_id = state["claim_id"]
+    claim_id = state["incident_id"]
 
     action_plan = state.get("action_plan", [])
     start_ts = datetime.datetime.fromisoformat(state["alert_started_at"].replace("Z", "+00:00")).replace(tzinfo=None)
@@ -210,17 +233,25 @@ def execute_node(state: AgentState) -> dict:
     affected_services = (state.get("affected_services") or ["payment_gateway"])
     service = affected_services[0]
 
-    # snapshot pre-remediation metrics so we can compare after
+    # snapshot pre-remediation metrics so we can compare after  
     pre_metrics = state.get("raw_signals", {})
     print(f"[execute] Pre-remediation snapshot: p99={pre_metrics.get('p99_latency_s')}, error_rate={pre_metrics.get('error_rate')}")
+    
+    is_shadow = bool(state.get("shadow_execution"))
+    if is_shadow:
+        print(f"[execute] SHADOW mode active for {state['incident_id']} — suppressing execution")
 
+    action_start_ts = datetime.datetime.utcnow()
     for action in action_plan:
-        result = execute_remediation(
-            action=action["action"],
-            tool=action["tool"],
-            params=action["params"],
-           
-        )
+        if is_shadow:
+            print(f"[execute] SHADOW: suppressing {action['action']}")
+            result = {"success": True, "result": "shadow, no-op", "dry_run": True}
+        else:
+            result = execute_remediation(
+                action=action["action"],
+                tool=action["tool"],
+                params=action["params"],
+            )
         
         # gate-2: executin and target binding
         target_service = action["params"].get("service", service)
@@ -246,6 +277,9 @@ def execute_node(state: AgentState) -> dict:
 
     action_executed_at = datetime.datetime.utcnow()
     action_executed_at_iso = action_executed_at.isoformat()
+    # agent_mttr = time from invocation to action completion.
+    # in simulation this is always 0s (deterministic path + no-op actions are instant).
+    # in production this will reflect real execution latency. not a bug.
     agent_mttr = int((action_executed_at - invoked_ts).total_seconds())
 
     # gate-3: temporal window (calculate dynamic grace period based on tools)
@@ -261,7 +295,7 @@ def execute_node(state: AgentState) -> dict:
     final_p99 = None
     final_error = None
     verification_evidence = None
-    t_clear = None
+    t_clear_polled = None
 
 
     if all_success:
@@ -279,7 +313,7 @@ def execute_node(state: AgentState) -> dict:
         if verified:
             verified_at = datetime.datetime.utcnow()
             verified_at_iso = verified_at.isoformat()
-            t_clear = result.t_clear
+            t_clear_polled = result.t_clear
             business_mttr = int((verified_at - start_ts).total_seconds())
             verification_evidence = asdict(result)
 
@@ -294,17 +328,40 @@ def execute_node(state: AgentState) -> dict:
         status = ResolutionStatus.FAILED.value
         print(f"[execute] Done: Agent MTTR={agent_mttr}s  success=False")
 
-    # merge state locally to pass to the attribution classifier
-    # the classifies needs to see the evidence we collected
-    state["t_claim"] = t_claim
-    state["execution_evidence"] = execution_evidence
-    state["verified"] = verified
-    state["verification_evidence"] = verification_evidence
-    state["t_clear"] = t_clear
-    state["claim_id"] = claim_id
+    # gate 5 : attribution uses TRUE recovery time (range-backfill)
+    # not the polled timestamp above
+    tool_name = action_plan[0]["tool"] if action_plan else ""
+    tolerance = DELTA_EFFECT_SECONDS.get(tool_name, 30) + VERIFICATION_OVERHEAD_SECONDS
+    signal = verification_evidence.get('signal') if verification_evidence else None
+    expr, threshold, comparison = _signal_expr(service, signal)
 
-    attribution_result = classify_attribution(state)
-    print(f"[attribution] resolution_cause={attribution_result['resolution_cause']} attribution_status={attribution_result['attribution_status']}")
+    ev = build_clear_evidence(
+        expr=expr, 
+        threshold=threshold,
+        t_action_start=action_start_ts,
+        t_action_end=action_executed_at,
+        t_now=datetime.datetime.utcnow(),
+        comparison=comparison,
+        t_clear_polled=t_clear_polled,
+    )
+    g3 = evaluate_gate3(ev, action_executed_at.timestamp(), tolerance_sec=tolerance)
+    gate1_claim = bool(claim_id and t_claim)
+    gate2_target_bound = any(e["success"] and e["target_bound"] for e in execution_evidence)
+    
+    #gate4 stay tied to the polling based verified flag
+    # when recovery happened, gate 4 is the smpler did it recover at all check
+    gate4_verified = bool(verified)
+    gate5_stable = True 
+    
+    resolution_cause = final_label(
+        gate1_claim=gate1_claim,
+        gate2_target_bound=gate2_target_bound,
+        gate3=g3,
+        gate4_verified=gate4_verified,
+        gate5_stable=gate5_stable,
+        shadow_arm=(bool(state.get("shadow_execution"))),
+    )
+    print(f"[attribution] resolution_cause={resolution_cause} lead={g3.lead_seconds} reason={g3.reason}")
 
     # record outcome in knowledge graph for future incident correlation
     append_past_incident(
@@ -315,7 +372,7 @@ def execute_node(state: AgentState) -> dict:
         action_taken = "; ".join(a["action"] for a in action_plan),
         business_mttr_seconds = business_mttr,
         success = all_success and verified,
-        resolution_cause = attribution_result.get("resolution_cause"),
+        resolution_cause =resolution_cause,
         verified_at = verified_at_iso,
         severity = state.get("severity"),
     )
@@ -338,9 +395,23 @@ def execute_node(state: AgentState) -> dict:
         "claim_id": claim_id,
         "t_claim": t_claim,
         "execution_evidence": execution_evidence,
-        "t_clear": t_clear,
         "verification_evidence": verification_evidence,
-        "resolution_cause": attribution_result['resolution_cause'],
-        "attribution_status": attribution_result['attribution_status']
+        "resolution_cause": resolution_cause,
+        "shadow_execution": (bool(state.get("shadow_execution"))),
+
+        # true recovery fields 
+        "t_clear_true": ev.t_clear_true,
+        "t_clear_polled": t_clear_polled,
+        "clear_source": ev.clear_source,
+        "healthy_run_len": ev.healthy_run_len,
+        "samples_seen": ev.samples_seen,
+        "attribution_lead_seconds": g3.lead_seconds,
+        "gate3_reason": g3.reason,
+        "gate1_claim":gate1_claim,
+        "gate2_target_bound":gate2_target_bound,
+        "gate3_temporal":g3.passed,
+        "gate4_verified":gate4_verified,
+        "gate5_stable":gate5_stable,
+        
     }
 
