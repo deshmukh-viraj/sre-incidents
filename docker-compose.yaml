@@ -5,7 +5,10 @@ services:
   simulator:
     image: insideviraj/fintech-sre-generator:latest
     container_name: fintech-sre-simulator
-    command: ["python", "-m", "generators.main", "--mode", "scenario", "--scenario", "payment_latency_spike"]
+    command: ["python", "-m", "generators.main", "--mode", "steady", "--metrics-port", "8000"]
+    ports:
+      - "8000:8000"
+      - "8001:8001"
     volumes:
       - ./fintech-sre-sim/logs:/app/logs
       - ./fintech-sre-sim:/app

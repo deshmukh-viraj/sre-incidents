@@ -111,5 +111,21 @@
       "executed": false,
       "result": null
     }
+  ],
+  "TEST-WRONGTARGET": [
+    {
+      "action": "Enable card_rails request queuing (TEST — wrong target)",
+      "tool": "set_feature_flag",
+      "params": {
+        "flag": "card_rails_queue_enabled",
+        "value": true,
+        "service": "account_ledger"
+      },
+      "blast_radius": "pod",
+      "reversible": true,
+      "requires_approval": false,
+      "executed": false,
+      "result": null
+    }
   ]
 }

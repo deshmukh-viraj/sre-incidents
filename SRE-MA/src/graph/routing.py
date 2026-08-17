@@ -30,6 +30,9 @@ MAX_DIAGNOSIS_LOOPS = 3       # prevent infinite re-diagnosis
 #per action class temporal windows (gate 3)
 # a single hardcoded grace_period=30 for every action type, as exists today, is not defensible: 
 # a feature-flag flip and a full rollback do not propagate at the same speed
+
+#time for poll + prometheus query 
+VERIFICATION_OVERHEAD_SECONDS = 25
 DELTA_EFFECT_SECONDS = {
     "set_feature_flag": 60,
     "rollback_deployment": 120,
@@ -47,8 +50,16 @@ T_STABLE_SECONDS = {
     Severity.SEV3.value: 1800,
 
 }
-#Severity classification (after detector collects signals)
 
+ALERT_CORRELATION_WINDOW = {
+    "SLOErrorBudgetBurnRateFast": 3600, #matches its own 1h rate() window
+    "PaymentDeclineRateAbnormal": 900, 
+    
+}
+DEFAULT_CORRELATION_WINDOW = 300 #fall back to existing debounce_sec value
+
+
+# severity classification (after detector collects signals)
 def classify_severity(state: AgentState) -> str:
     """
     python classifies severity from raw metric values.
@@ -86,24 +97,6 @@ def classify_severity(state: AgentState) -> str:
     return Severity.SEV3.value
 
 
-#route after detector
-
-def route_after_detector(state: AgentState,) -> Literal["diagnoser", "resolved"]:
-    """
-    After detector collects signals, ALWAYS proceed to diagnosis.
-    
-    We do NOT short-circuit to "resolved" here based on naive metric checks.
-    Why? Because a blanket "latency is fine" check will silently drop 
-    critical non-latency alerts like Fraud Model Degradation (RB-006), 
-    Data Exfiltration (RB-003), or Compliance Audits (RB-005).
-    
-    If an alert was a "flap" and self-resolved, the Diagnoser agent 
-    will query the metrics/logs, see they are healthy, and conclude 
-    "Transient spike, no action needed" naturally.
-    """
-    return "diagnoser"
-
-
 #deterministic diagnosis routing 
 def deterministic_diagnosis(state: AgentState) -> dict:
     """
@@ -126,7 +119,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
     slow_queries = log_patterns.get("slow_queries", 0)
     hikaripoolerr = log_patterns.get("hikaripoolerror", False)
 
-    #RB-001: Payment Latency Spike
+    #RB-001: payment latency spike
     if runbook_id == "RB-001" and p99 is not None and p99 >= P99_LATENCY_WARNING:
         return {
             "hypothesis": "Card rails throttling causing payment latency spike",
@@ -141,7 +134,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "diagnosis_mode":"deterministic",
         }
 
-    #RB-002: Circuit Breaker Trip
+    #RB-002: circuit breaker trip
     if runbook_id == "RB-002" and cb_state is not None and cb_state > CIRCUIT_BREAKER_OPEN:
         return {
             "hypothesis":"Circuit breaker is OPEN, downstream service failing",
@@ -155,7 +148,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "diagnosis_mode": "deterministic",
         }
 
-    #RB-003: Data Exfiltration
+    #RB-003: data exfiltration
     if runbook_id=="RB-003" and (bulk_export or auth_failures >= 50):
         return {
             "hypothesis":"Possible data exfiltration — bulk export or credential stuffing",
@@ -169,7 +162,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "diagnosis_mode": "deterministic",
         }
 
-    #RB-004: DB Connection Exhaustion
+    #RB-004: db connection exhaustion
     if runbook_id == "RB-004" and (
         (db_pool is not None and db_pool >= DB_POOL_WARNING)
         or hikaripoolerr
@@ -188,7 +181,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "diagnosis_mode":"deterministic",
         }
 
-    #RB-005: Compliance audit 
+    #RB-005: compliance audit 
     if runbook_id == "RB-005":
         return {
             "hypothesis": "Compliance audit triggered",
@@ -201,7 +194,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "diagnosis_mode": "deterministic",
         }
 
-    #RB-006: Fraud Model Degradation
+    #RB-006: fraud model degradation
     if runbook_id == "RB-006" and decline_rate is not None and decline_rate >= DECLINE_RATE_HIGH:
         return {
             "hypothesis": "Fraud model degradation causing false positive payment declines",
@@ -214,7 +207,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "diagnosis_mode":"deterministic",
         }
 
-    #NO runbook label in alert or runbook label present but confirming signals not strong enough
+    #no runbook label in alert or runbook label present but confirming signals not strong enough
     #pattern match freely against all signals
 
     #circuit breaker
@@ -224,7 +217,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "evidence": [f"circuit_breaker_state={cb_state:.1f}"],
             "confidence": 0.92,
             "alternative": "Deployment caused downstream 500s",
-            "supporting_runbook": "RB-002",
+            "supporting_runbook": runbook_id or "RB-002",
         }
     
     #db pool
@@ -238,7 +231,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             ],
             "confidence": 0.90,
             "alternative": "Traffic burst exceeding pool capacity",
-            "supporting_runbook": "RB-004"
+            "supporting_runbook": runbook_id or "RB-004"
         }
     
     #throttle rate - card rails
@@ -248,7 +241,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "evidence": [f"throttle_rate={throttle_rate:.3f}"],
             "confidence": 0.88,
             "alternative": "Recent deployment regression",
-            "supporting_runbook": "RB-001",
+            "supporting_runbook": runbook_id or "RB-001",
         }
     
     #p99 alone -high letency without clear cause
@@ -258,10 +251,10 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "evidence": [f"p99={p99:.3f}s  (critical threshold={P99_LATENCY_CRITICAL})"],
             "confidence": 0.65,
             "alternative": "Multiple possible causes",
-            "supporting_runbook": "RB-001",
+            "supporting_runbook": runbook_id or "RB-001",
         }
     
-    #Security
+    #security
     if auth_failures >= 50 and bulk_export:
         return {
             "hypothesis": "Data exfiltration - credential stuffing with bulk export",
@@ -271,7 +264,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             ],
             "confidence": 0.85,
             "alternative": "Legitimate audit tool activity",
-            "supporting_runbook": "RB-003",
+            "supporting_runbook": runbook_id or "RB-003",
         }
 
     #fraud model
@@ -281,15 +274,15 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "evidence": [f"decline_rate={decline_rate:.3f}"],
             "confidence": 0.82,
             "alternative": "Genuine fraud spike",
-            "supporting_runbook": "RB-006",
+            "supporting_runbook": runbook_id or "RB-006",
         }
 
-    #Nothing matched
+    #nothing matched
     return None
 
 
 
-#Route after diagnosis
+#route after diagnosis
 def route_after_diagnosis(
     state: AgentState,
 ) -> Literal["remediator", "llm_diagnoser", "escalate"]:
@@ -307,8 +300,8 @@ def route_after_diagnosis(
         return "escalate"
 
     if not hypotheses:
-        # No hypothesis at all -> try LLM
-        if diagnosis_mode == "llm":
+        # no hypothesis at all -> try LLM, unless we already tried or are about to
+        if diagnosis_mode in ("llm", "pending_llm"):
             return "escalate"
         return "llm_diagnoser"
 
@@ -317,7 +310,7 @@ def route_after_diagnosis(
     if max_confidence >= DIAGNOSIS_CONFIDENCE:
         return "remediator"
 
-    # Confidence too low
+    # confidence too low
     if diagnosis_mode == "llm":
         # LLM already tried and still not confident -> give up
         return "escalate"
@@ -326,7 +319,7 @@ def route_after_diagnosis(
     return "llm_diagnoser"
 
 
-#Check if approval is needed
+#check if approval is needed
 def route_after_remediator(
     state: AgentState,
 ) -> Literal["human_gate", "execute"]:
@@ -349,7 +342,7 @@ def route_after_verification(state: AgentState) -> Literal["end_resolved", "esca
         return "escalate_execution"
 
         
-#Blast radius classifier
+#blast radius classifier
 def classify_blast_radius(action: dict) -> str:
     """
     figure out how bad this action is.
@@ -394,3 +387,27 @@ def requires_human_approval(action: dict) -> bool:
     if blast == "service":
         return True
     return False
+
+
+#infer service name
+def infer_service(alert_name: str) -> str:
+    mapping = {
+        "PaymentGateway": "payment_gateway",
+        "SLOError": "payment_gateway",
+        "SLOBudget": "payment_gateway",
+        "PaymentDecline": "payment_gateway",
+        "PaymentTransaction": "payment_gateway",
+        "CircuitBreaker": "payment_gateway",
+        "DBConnection": "account_ledger",
+        "SlowQuery": "account_ledger",
+        "Ledger": "account_ledger",
+        "ServiceMemory": "account_ledger",
+        "Anomalous": "api_gateway",
+        "Authentication": "api_gateway",
+        "Compliance": "api_gateway",
+        "FraudModel": "fraud_detector",
+    }
+    for keyword, svc in mapping.items():
+        if keyword.lower() in alert_name.lower():
+            return svc
+    return "payment_gateway"

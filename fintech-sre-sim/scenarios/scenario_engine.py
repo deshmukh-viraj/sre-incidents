@@ -22,7 +22,7 @@ class ScenarioPhase:
     db_pool_saturation: dict = field(default_factory=dict)
     circuit_breaker_open: dict = field(default_factory=dict)
     on_enter: Optional[Callable] = None  # hook for logging/alerting side effects
-
+    interruptible: bool = True
 
 @dataclass
 class Scenario:
@@ -319,6 +319,51 @@ SCENARIO_CASCADING_FAILURE = Scenario(
     ],
 )
 
+# scenario 8: natural calm / transient network spike
+# downstream BGP route flap naturally subsides on a fixed timer without intervention
+SCENARIO_NATURAL_CALM_TRANSIENT_SPIKE = Scenario(
+    id="NC-001",
+    name="natural_calm_transient_spike",
+    description="Transient network congestion that naturally clears on a fixed timer regardless of agent action",
+    root_cause="Transient BGP route oscillation at upstream carrier (self-healing after 60s)",
+    expected_alerts=[
+        "TransientNetworkCongestion",
+        "PaymentGatewayP99LatencyHigh",
+        
+    ],
+    slo_impact="Transient latency spike; automatically recovers without operator or agent intervention",
+    phases=[
+        ScenarioPhase(
+            name="ramp_up",
+            duration_seconds=60,
+            interruptible=False,
+            latency_multiplier={"payment_gateway": 5.0, "card_rails": 8.0},
+            error_rate_override={"payment_gateway": 0.08},
+        ),
+        ScenarioPhase(
+            name="peak_degradation",
+            duration_seconds=240, # 180s peak ensures prometheus 2m alert rule 'for:' timer fires
+            interruptible=False, 
+            latency_multiplier={"payment_gateway": 10.0, "card_rails": 15.0},
+            error_rate_override={"payment_gateway": 0.20},
+        ),
+        ScenarioPhase(
+            name="natural_calming",
+            duration_seconds=60, # metrics drop below threshold, alert resolves automatically
+            interruptible=False, 
+            latency_multiplier={"payment_gateway": 2.0, "card_rails": 2.5},
+            error_rate_override={"payment_gateway": 0.02},
+        ),
+        ScenarioPhase(
+            name="resolved",
+            duration_seconds=30,  # baseline fully restored
+            interruptible=False,
+            latency_multiplier={},
+            error_rate_override={},
+        ),
+    ],
+)
+
 ALL_SCENARIOS = {
     s.name: s for s in [
         SCENARIO_PAYMENT_LATENCY_SPIKE,
@@ -328,6 +373,7 @@ ALL_SCENARIOS = {
         SCENARIO_COMPLIANCE_AUDIT,
         SCENARIO_FRAUD_MODEL_DEGRADATION,
         SCENARIO_CASCADING_FAILURE,
+        SCENARIO_NATURAL_CALM_TRANSIENT_SPIKE,
     ]
 }
 
@@ -383,7 +429,7 @@ class ScenarioEngine:
                     while time.time() < end_time:
                         if self._stop_event.wait(timeout=1):
                             break
-                        if self._resolved_event.is_set():
+                        if phase.interruptible and self._resolved_event.is_set():
                             print(f"[scenario]   -> Phase {phase.name} cut short by /control/resolve")
                             self._resolved_event.clear()
                             break

@@ -1,5 +1,5 @@
-# Fintech SRE Simulation Environment — Full Observability Stack
-# Services: Prometheus, Grafana, Loki, Tempo, Alertmanager, OTel Collector
+# fintech sre simulation environment — full observability stack
+# services: prometheus, grafana, loki, tempo, alertmanager, otel collector
 # + the simulation data generator itself
 
 networks:
@@ -15,7 +15,7 @@ volumes:
 
 services:
   
-  # Data generator (metrics + logs + traces)
+  # data generator (metrics + logs + traces)
   sim-generator:
     build:
       context: .
@@ -23,6 +23,7 @@ services:
     command: python -m generators.main --mode steady --metrics-port 8000
     ports:
       - "8000:8000"
+      - "8001:8001"
     volumes:
       - ./:/app
       - ./logs:/app/logs
@@ -33,7 +34,7 @@ services:
     restart: unless-stopped
 
 
-  # Prometheus — metrics collection and alerting
+  # prometheus — metrics collection and alerting
  
   prometheus:
     image: prom/prometheus:v2.51.0
@@ -54,7 +55,7 @@ services:
     restart: unless-stopped
 
 
-  # Alertmanager — routes alerts to Slack/PagerDuty (webhook simulation)
+  # alertmanager — routes alerts to Slack/PagerDuty (webhook simulation)
   alertmanager:
     image: prom/alertmanager:v0.27.0
     ports:
@@ -68,7 +69,7 @@ services:
     restart: unless-stopped
 
 
-  # Loki — log aggregation (receives structured JSON from generator)
+  # loki — log aggregation (receives structured JSON from generator)
   
   loki:
     image: grafana/loki:2.9.6
@@ -83,7 +84,7 @@ services:
     restart: unless-stopped
 
 
-  # Promtail — ships container logs to Loki
+  # promtail — ships container logs to Loki
 
   promtail:
     image: grafana/promtail:2.9.6
@@ -133,7 +134,7 @@ services:
   #   restart: unless-stopped
 
  
-  # Grafana — unified dashboards for metrics, logs, traces
+  # grafana — unified dashboards for metrics, logs, traces
   
   grafana:
     image: grafana/grafana:10.4.2

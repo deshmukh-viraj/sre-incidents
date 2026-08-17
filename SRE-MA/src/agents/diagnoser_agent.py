@@ -17,6 +17,7 @@ writes to state:
 
 """
 
+
 import os
 import json
 import re
@@ -28,7 +29,7 @@ from src.graph.state import AgentState
 from src.graph.routing import deterministic_diagnosis, DIAGNOSIS_CONFIDENCE
 from src.tools.kg_tool import query_knowledge_graph
 from src.tools.sre_tool import lookup_runbook
-from src.agents.utils import _get_llm
+from src.agents.utils import _get_llm, parse_json_from_llm
 
 load_dotenv()
 
@@ -60,8 +61,8 @@ def diagnoser_node(state: AgentState) -> dict:
             "supporting_runbook": result.get("supporting_runbook")
         }
         
-        affected_services = state.get("affected_services", [])
-        affected_service = affected_services[0] if affected_services else "unknown_service"
+        affected_service = state.get("affected_services", ["unknown"])[0]
+        
 
         return {
             "hypotheses": [hypothesis],
@@ -85,7 +86,7 @@ def diagnoser_node(state: AgentState) -> dict:
 
     if past_inci:
         root_cause = past_inci.get("root_cause", "unknown")
-        action_taken = past_inci.get("action_taken", "unknonw")
+        action_taken = past_inci.get("action_taken", "unknown")
         print(f"[diagnoser] Reusing past remediation: {root_cause}")
         return {
             "hypotheses": [{
@@ -93,7 +94,7 @@ def diagnoser_node(state: AgentState) -> dict:
                 "evidence": ["Retrived from Knowledge GRAPH (past incident)"],
                 "confidence": 0.95,
                 "alternative": None,
-                "supporting_runbook": "KG-Memory"
+                "supporting_runbook": state.get("runbook_id") or "KG-Memory"
             }],
             "root_cause": root_cause,
             "diagnosis_mode": "KG-Memory-Recall",
@@ -103,23 +104,13 @@ def diagnoser_node(state: AgentState) -> dict:
             "llm_suggested_action": action_taken
         }
 
+
     print("[diagnoser] no past incident found will route to LLM diagnoser")
     return {
         "hypotheses": [],
-        "diagnosis_mode": "deterministic",
+        "diagnosis_mode": "pending_llm",  # 'deterministic' here caused router to waste all retry loops on broken LLM
         "diagnosis_loops": state.get("diagnosis_loops", 0) + 1,
     }
-
-
-def repair_json(json_str: str) -> str:
-    """
-    best-effort repair for common LLM JSON syntax errors (trailing commas, missing quotes/commas).
-    """
-    # remove trailing commas before closing braces/brackets
-    cleaned = re.sub(r',\s*([\}\]])', r'\1', json_str)
-    # add missing commas between string/number/bool fields and next key
-    cleaned = re.sub(r'("\s*|\b(?:true|false|null|\d+)\s*)\n?(\s*")', r'\1,\2', cleaned)
-    return cleaned
 
 
 # nnode 2: llm diagnoser
@@ -223,23 +214,9 @@ Diagnose this incident. Return JSON ONLY.
         resp = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
         raw_json = resp.content.strip()
 
-        # extract the outermost JSON object regardless of markdown fences or surrounding text
-        m = re.search(r'\{.*\}', raw_json, re.DOTALL)
-        if not m:
-            raise ValueError(f"No JSON object found in LLM response ({len(raw_json)} chars)")
-        
-        extracted_json = m.group()
-        try:
-            parsed = json.loads(extracted_json)
-        except json.JSONDecodeError as json_err:
-            print(f"[llm_diagnoser] Standard json parse failed: {json_err}. Attempting repair...")
-            try:
-                repaired_str = repair_json(extracted_json)
-                parsed = json.loads(repaired_str)
-                print(f"[llm_diagnoser] JSON repair succeeded")
-            except Exception as repair_err:
-                print(f"[llm_diagnoser] JSON repair failed: {repair_err}")
-                parsed = {}
+        parsed = parse_json_from_llm(raw_json)
+        if not parsed:
+            print("[llm_diagnoser] WARNING: Could not parse valid JSON from LLM response")
         hypotheses = parsed.get("hypotheses", [])
         root_cause = parsed.get("root_cause")
         llm_action = parsed.get("suggested_remediation_from_context")

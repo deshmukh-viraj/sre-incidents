@@ -20,10 +20,23 @@ from scenarios.scenario_engine import ScenarioEngine, ALL_SCENARIOS
 engine = ScenarioEngine()
 control_api = FastAPI()
 
+@control_api.get("/control/resolve")
 @control_api.post("/control/resolve")
 def resolve_scenario():
     engine.resolve()
     return {"status": "resolving"}
+
+@control_api.get("/control/trigger/{scenario_name}")
+@control_api.post("/control/trigger/{scenario_name}")
+def trigger_scenario(scenario_name: str):
+    if scenario_name not in ALL_SCENARIOS:
+        return {"error": f"unknown scenario '{scenario_name}' available {list(ALL_SCENARIOS.keys())}"}, 400
+    engine.run_scenario_async(scenario_name)
+    return {"status": "triggered", "scenario": scenario_name}
+
+@control_api.get("/control/scenarios")
+def list_scenarios():
+    return {"available_scenarios": list(ALL_SCENARIOS.keys())}
 
 def start_control_api():
     """runs in background"""

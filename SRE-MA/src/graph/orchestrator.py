@@ -144,6 +144,9 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     print(f"\n{'='*60}")
     print(f"INCIDENT: {incident_id}")
     print(f"ALERT: {raw_signals.get('alert_name', 'unknown')}")
+    
+    if raw_signals.get("shadow_execution") or state.get("shadow_execution"):
+        print("ARM: SHADOW (execution suppressed)")
     print(f"{'='*60}")
 
     result = app.invoke(state, config=config)

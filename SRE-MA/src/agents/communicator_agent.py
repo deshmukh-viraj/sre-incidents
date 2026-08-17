@@ -19,7 +19,7 @@ import json
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from src.graph.state import AgentState
-from src.agents.utils import _get_llm
+from src.agents.utils import _get_llm, parse_json_from_llm
 
 load_dotenv()
 
@@ -65,12 +65,7 @@ Return this exact JSON structure:
         resp = llm.invoke([HumanMessage(content=prompt)])
         raw  = resp.content.strip()
 
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-
-        parsed = json.loads(raw)
+        parsed = parse_json_from_llm(raw)
 
         usage = resp.response_metadata.get("token_usage", {})
         new_tokens = usage.get("total_tokens", 0)

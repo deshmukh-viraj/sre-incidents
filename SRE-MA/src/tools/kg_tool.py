@@ -141,7 +141,7 @@ def query_past_incident_only(service: str, alert_name: str) -> Optional[dict]:
         with driver.session() as session:
             result = session.run(
                 "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) "
-                "WHERE p.service = $service AND p.success = true "
+                "WHERE p.service = $service AND p.resolution_cause = 'agent_remediated' "
                 "RETURN p.root_cause AS root_cause, p.action_taken AS action_taken "
                 "ORDER BY p.timestamp DESC LIMIT 1",
                 service=service, alert_name=alert_name,
@@ -199,3 +199,43 @@ def revoke_credit(incident_id: str, new_incident_id: str) -> None:
         if tx: tx.rollback()
         print(f"[kg_tool] revoke_credit failed: {e}")
         raise
+
+
+def find_active_upstream_incident(service: str, window_min: int = 30) -> Optional[dict]:
+    """
+    walks the DEPENDs_ON graph to see if an upstream service had an incident
+    in the last x minutes
+    """
+    if driver is None: return None
+    try:
+        with driver.session() as session:
+            query = """
+            MATCH (s:Service {name: $service})-[:DEPENDS_ON*1..2]->(dep:Service)
+            MATCH (p:PastIncident {service: dep.name})
+            WHERE p.timestamp >= datetime() - duration({minutes: $window}) AND p.success = true
+            RETURN p.incident_id AS incident_id,
+                    dep.name AS upstream_service,
+                    p.root_cause AS root_cause
+            ORDER BY p.timestamp DESC LIMIT 1
+            """
+            result = session.run(query,service=service, window=window_min)
+            records = [dict(r) for r in result]
+            return records[0] if records else None
+    except Exception as e:
+        print(f"[kg_tool] find_active_upstream_incident failed: {e}")
+        return None            
+
+
+def get_dependencies(service: str, hops: int=2) -> List[str]:
+    if driver is None: return []
+    try:
+        with driver.session() as session:
+            result = session.run(
+                f"MATCH (s:Service {{name: $service}})-[:DEPENDS_ON*1..{hops}]->(dep:Service) "
+                f"RETURN DISTINCT dep.name AS name",
+                service=service,
+            )
+            return [r["name"] for r in result]
+    except Exception as e:
+        print(f"[kg_tool] get_dependencies({service}, hops={hops}) failed: {e}")
+        return []

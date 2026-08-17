@@ -89,3 +89,5 @@ target/
 mango/
 test.ipynb/
 src/data/
+requirements_copy.txt
+
