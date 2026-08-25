@@ -58,6 +58,39 @@ ALERT_CORRELATION_WINDOW = {
 }
 DEFAULT_CORRELATION_WINDOW = 300 #fall back to existing debounce_sec value
 
+NOVEL_DB_PRESSURE = 0.50
+RUNBOOK_EXPLAINS = {
+    "RB-001": {"p99", "error", "throttle_rate"},
+    "RB-002": {"circuit_breaker", "error_rate", "p99", "db_pool"},
+    "RB-003": {"auth_failures", "bulk_export", "error_rate"},
+    "RB-004": {"db_pool", "slow_queries", "hikaripoolerror", "p99", "error_rate"},
+    "RB-005": set(),
+    "RB-006": {"decline_rate", "error_rate"},
+}
+
+def _anomalous_sig(state: AgentState):
+    s = state.get("raw_signals", {}); lp = s.get("log_patterns", {})
+    out = {}
+    if (s.get("p99_latency_s") or 0) >= P99_LATENCY_WARNING: out["p99"] = 1
+    if (s.get("error_rate") or 0) >= ERROR_RATE_WARNING: out["error"] = 1
+    if (s.get("throttle_error_rate") or 0) >= THROTTLE_RATE_HIGH: out["throttle"] = 1
+    if (s.get("db_pool_utilization") or 0) >= DB_POOL_WARNING: out["db_pool"] = 1
+    if (s.get("circuit_breaker_state") or 0) > CIRCUIT_BREAKER_OPEN: out["circuit_breaker"] = 1
+    if (s.get("payment_decline_rate") or 0) >= DECLINE_RATE_HIGH: out["decline_rate"] = 1
+    if lp.get("auth_failures", 0) >= 50: out["auth_failures"] = 1
+    if lp.get("bulk_data_export"): out["bulk_export"] = 1
+    return out
+
+
+def _apply_residual_check(result: dict, state: AgentState) -> dict:
+    """novelty/ood gate: cap confidence when matched rb cannot explain every live anomaly"""
+    if result and (explains := RUNBOOK_EXPLAINS.get(result.get("supporting_runbook"))) is not None:
+        if unexplained := (_anomalous_sig(state).keys() - explains):
+            result["confidence"] = min(result.get("confidence", 1.0), 0.65)
+        result["evidence"] = (result.get("evidence") or []) + [
+                f"UNEXPLAINED by {result['supporting_runbook']}: {', '.join(unexplained)}"
+        ]
+    return result
 
 # severity classification (after detector collects signals)
 def classify_severity(state: AgentState) -> str:
@@ -121,7 +154,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
 
     #RB-001: payment latency spike
     if runbook_id == "RB-001" and p99 is not None and p99 >= P99_LATENCY_WARNING:
-        return {
+        return _apply_residual_check({
             "hypothesis": "Card rails throttling causing payment latency spike",
             "evidence":[
                 f"p99={p99:.3f}s (threshold={P99_LATENCY_WARNING}s)",
@@ -132,11 +165,11 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "alternative": "DB pool pressure or bad deployment causing latency",
             "supporting_runbook": "RB-001",
             "diagnosis_mode":"deterministic",
-        }
+        }, state)
 
     #RB-002: circuit breaker trip
     if runbook_id == "RB-002" and cb_state is not None and cb_state > CIRCUIT_BREAKER_OPEN:
-        return {
+        return _apply_residual_check({
             "hypothesis":"Circuit breaker is OPEN, downstream service failing",
             "evidence":[
                 f"circuit_breaker_state={cb_state:.1f} (open threshold={CIRCUIT_BREAKER_OPEN})",
@@ -146,11 +179,11 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "alternative": "Deployment caused downstream 500s",
             "supporting_runbook": "RB-002",
             "diagnosis_mode": "deterministic",
-        }
+        }, state)
 
     #RB-003: data exfiltration
     if runbook_id=="RB-003" and (bulk_export or auth_failures >= 50):
-        return {
+        return _apply_residual_check({
             "hypothesis":"Possible data exfiltration — bulk export or credential stuffing",
             "evidence":[
                 f"bulk_data_export={bulk_export}",
@@ -160,7 +193,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "alternative": "Legitimate audit tool activity",
             "supporting_runbook": "RB-003",
             "diagnosis_mode": "deterministic",
-        }
+        }, state)
 
     #RB-004: db connection exhaustion
     if runbook_id == "RB-004" and (
@@ -168,7 +201,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
         or hikaripoolerr
         or slow_queries >= 3
     ):
-        return {
+        return _apply_residual_check({
             "hypothesis":"Database connection pool exhaustion",
             "evidence": [
                 f"db_pool={db_pool:.2f}" if db_pool else "",
@@ -179,11 +212,11 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "alternative": "Traffic burst exceeding pool capacity",
             "supporting_runbook": "RB-004",
             "diagnosis_mode":"deterministic",
-        }
+        }, state)
 
     #RB-005: compliance audit 
     if runbook_id == "RB-005":
-        return {
+        return _apply_residual_check({
             "hypothesis": "Compliance audit triggered",
             "evidence": [
                 f"runbook_id={runbook_id} label present on alert",
@@ -192,11 +225,11 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "alternative": None,
             "supporting_runbook": "RB-005",
             "diagnosis_mode": "deterministic",
-        }
+        }, state)
 
     #RB-006: fraud model degradation
     if runbook_id == "RB-006" and decline_rate is not None and decline_rate >= DECLINE_RATE_HIGH:
-        return {
+        return _apply_residual_check({
             "hypothesis": "Fraud model degradation causing false positive payment declines",
             "evidence": [
                 f"payment_decline_rate={decline_rate:.3f} (baseline ~0.008)",
@@ -205,77 +238,77 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             "alternative": "Genuine fraud spike",
             "supporting_runbook": "RB-006",
             "diagnosis_mode":"deterministic",
-        }
+        }, state)
 
-    #no runbook label in alert or runbook label present but confirming signals not strong enough
-    #pattern match freely against all signals
+    # #no runbook label in alert or runbook label present but confirming signals not strong enough
+    # #pattern match freely against all signals
 
-    #circuit breaker
-    if cb_state is not None and cb_state > CIRCUIT_BREAKER_OPEN:
-        return {
-            "hypothesis": "Circuit breaker OPEN- downstream service failing",
-            "evidence": [f"circuit_breaker_state={cb_state:.1f}"],
-            "confidence": 0.92,
-            "alternative": "Deployment caused downstream 500s",
-            "supporting_runbook": runbook_id or "RB-002",
-        }
+    # #circuit breaker
+    # if cb_state is not None and cb_state > CIRCUIT_BREAKER_OPEN:
+    #     return _apply_residual_check({
+    #         "hypothesis": "Circuit breaker OPEN- downstream service failing",
+    #         "evidence": [f"circuit_breaker_state={cb_state:.1f}"],
+    #         "confidence": 0.92,
+    #         "alternative": "Deployment caused downstream 500s",
+    #         "supporting_runbook": runbook_id or "RB-002",
+    #     }, state)
     
-    #db pool
-    if (db_pool is not None and db_pool >= DB_POOL_WARNING) or hikaripoolerr:
-        return {
-            "hypothesis": "Database connection pool exhastion",
-            "evidence": [
-                f"db_pool={db_pool:.2f}" if db_pool else "",
-                f"hikaripoolerr={hikaripoolerr}",
+    # #db pool
+    # if (db_pool is not None and db_pool >= DB_POOL_WARNING) or hikaripoolerr:
+    #     return _apply_residual_check({
+    #         "hypothesis": "Database connection pool exhastion",
+    #         "evidence": [
+    #             f"db_pool={db_pool:.2f}" if db_pool else "",
+    #             f"hikaripoolerr={hikaripoolerr}",
                 
-            ],
-            "confidence": 0.90,
-            "alternative": "Traffic burst exceeding pool capacity",
-            "supporting_runbook": runbook_id or "RB-004"
-        }
+    #         ],
+    #         "confidence": 0.90,
+    #         "alternative": "Traffic burst exceeding pool capacity",
+    #         "supporting_runbook": runbook_id or "RB-004"
+    #     }, state)
     
-    #throttle rate - card rails
-    if throttle_rate is not None and throttle_rate >= THROTTLE_RATE_HIGH:
-        return {
-            "hypothesis": "Card rails throttling causing payment latency spike",
-            "evidence": [f"throttle_rate={throttle_rate:.3f}"],
-            "confidence": 0.88,
-            "alternative": "Recent deployment regression",
-            "supporting_runbook": runbook_id or "RB-001",
-        }
+    # #throttle rate - card rails
+    # if throttle_rate is not None and throttle_rate >= THROTTLE_RATE_HIGH:
+    #     return _apply_residual_check({
+    #         "hypothesis": "Card rails throttling causing payment latency spike",
+    #         "evidence": [f"throttle_rate={throttle_rate:.3f}"],
+    #         "confidence": 0.88,
+    #         "alternative": "Recent deployment regression",
+    #         "supporting_runbook": runbook_id or "RB-001",
+    #     }, state)
     
-    #p99 alone -high letency without clear cause
-    if p99 is not None and p99 > P99_LATENCY_CRITICAL:
-        return {
-            "hypothesis": "Severe latency spike - cause unclear from metrics alone",
-            "evidence": [f"p99={p99:.3f}s  (critical threshold={P99_LATENCY_CRITICAL})"],
-            "confidence": 0.65,
-            "alternative": "Multiple possible causes",
-            "supporting_runbook": runbook_id or "RB-001",
-        }
+    # #p99 alone -high letency without clear cause
+    # if p99 is not None and p99 > P99_LATENCY_CRITICAL:
+    #     return _apply_residual_check({
+    #         "hypothesis": "Severe latency spike - cause unclear from metrics alone",
+    #         "evidence": [f"p99={p99:.3f}s  (critical threshold={P99_LATENCY_CRITICAL})"],
+    #         "confidence": 0.65,
+    #         "alternative": "Multiple possible causes",
+    #         "supporting_runbook": runbook_id or "RB-001",
+    #     }, state)
     
-    #security
-    if auth_failures >= 50 and bulk_export:
-        return {
-            "hypothesis": "Data exfiltration - credential stuffing with bulk export",
-            "evidence": [
-                f"auth_failures={auth_failures}",
-                f"bulk_export={bulk_export}",
-            ],
-            "confidence": 0.85,
-            "alternative": "Legitimate audit tool activity",
-            "supporting_runbook": runbook_id or "RB-003",
-        }
+    # #security
+    # if auth_failures >= 50 and bulk_export:
+    #     return _apply_residual_check({
+    #         "hypothesis": "Data exfiltration - credential stuffing with bulk export",
+    #         "evidence": [
+    #             f"auth_failures={auth_failures}",
+    #             f"bulk_export={bulk_export}",
+    #         ],
+    #         "confidence": 0.85,
+    #         "alternative": "Legitimate audit tool activity",
+    #         "supporting_runbook": runbook_id or "RB-003",
+    #     }, state)
 
-    #fraud model
-    if decline_rate is not None and decline_rate >= DECLINE_RATE_HIGH:
-        return {
-            "hypothesis": "Fraud model degradation - false positive decpline",
-            "evidence": [f"decline_rate={decline_rate:.3f}"],
-            "confidence": 0.82,
-            "alternative": "Genuine fraud spike",
-            "supporting_runbook": runbook_id or "RB-006",
-        }
+    # #fraud model
+    # if decline_rate is not None and decline_rate >= DECLINE_RATE_HIGH:
+    #     return _apply_residual_check({
+    #         "hypothesis": "Fraud model degradation - false positive decpline",
+    #         "evidence": [f"decline_rate={decline_rate:.3f}"],
+    #         "confidence": 0.82,
+    #         "alternative": "Genuine fraud spike",
+    #         "supporting_runbook": runbook_id or "RB-006",
+    #     }, state)
 
     #nothing matched
     return None
@@ -301,7 +334,7 @@ def route_after_diagnosis(
 
     if not hypotheses:
         # no hypothesis at all -> try LLM, unless we already tried or are about to
-        if diagnosis_mode in ("llm", "pending_llm"):
+        if diagnosis_mode == "llm":
             return "escalate"
         return "llm_diagnoser"
 
@@ -312,10 +345,7 @@ def route_after_diagnosis(
 
     # confidence too low
     if diagnosis_mode == "llm":
-        # LLM already tried and still not confident -> give up
         return "escalate"
-
-    # haven't tried the llm yet -> give it a shot
     return "llm_diagnoser"
 
 
@@ -340,6 +370,18 @@ def route_after_verification(state: AgentState) -> Literal["end_resolved", "esca
         return "end_resolved"
     else:
         return "escalate_execution"
+
+
+def route_after_investigation(state) -> Literal["critic", "llm_diagnoser"]:
+    """harness failure (diagnosisi_mode == 'pending_llm') degrades to legacy on shot"""
+    if state.get("diagnosis_mode") == "pending_llm":
+        return "llm_diagnoser"
+    return "critic"
+
+
+def route_after_human_gate(state):
+    """fix: a denied approval must NEVER reach the executor"""
+    return "execute" if state.get("human_approved") else "escalate"
 
         
 #blast radius classifier
