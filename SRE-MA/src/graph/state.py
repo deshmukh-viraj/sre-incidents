@@ -144,6 +144,22 @@ class AgentState(TypedDict, total=False):
     gate5_stable: Optional[bool]
     shadow_execution: bool
 
+    #deep agent harness fields
+    investigation_scratchpad: List[str] 
+    investigation_steps: int 
+    investigation_complete: bool 
+    proposed_tool: Optional[str] 
+    proposed_target: Optional[str] 
+    proposed_blast_radius: Optional[str] 
+    critique: Optional[str]
+    diagnosis_issues: List[str]
+    policy_rejections: List[str]
+    executed_action_keys: List[str]
+    plan_viable: bool
+    
+
+    
+
 def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
     """
     factory method: creates a fresh agent state from a new alert.
@@ -223,5 +239,18 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         gate5_stable=None,
         shadow_execution=bool(raw_signals.get("shadow_execution", False)),
         healthy_run_len=None,
-        samples_seen=None
+        samples_seen=None,
+
+        #deep agent harness fields
+        investigation_scratchpad=[],
+        investigation_steps=0,
+        investigation_complete=False,
+        proposed_tool=None,
+        proposed_target=None,
+        proposed_blast_radius=None,
+        critique=None,
+        diagnosis_issues=[],
+        policy_rejections=[],
+        executed_action_keys=[],
+        plan_viable=True
     )
