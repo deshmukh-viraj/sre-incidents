@@ -19,3 +19,4 @@ langgraph-checkpoint-sqlite
 sentence-transformers
 langchain-huggingface
 langchain-openai
+langchain-core

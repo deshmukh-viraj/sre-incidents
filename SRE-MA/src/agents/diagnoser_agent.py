@@ -85,23 +85,25 @@ def diagnoser_node(state: AgentState) -> dict:
     past_inci = query_past_incident_only(service=service, alert_name=alert_name)
 
     if past_inci:
+        live_confirm = deterministic_diagnosis(state)
+        recall_conf = 0.95 if live_confirm else 0.60
         root_cause = past_inci.get("root_cause", "unknown")
         action_taken = past_inci.get("action_taken", "unknown")
-        print(f"[diagnoser] Reusing past remediation: {root_cause}")
+        print(f"[diagnoser] Reusing past remediation: {root_cause} (conf = {recall_conf})")
         return {
             "hypotheses": [{
                 "hypothesis": root_cause,
                 "evidence": ["Retrived from Knowledge GRAPH (past incident)"],
-                "confidence": 0.95,
+                "confidence": recall_conf,
                 "alternative": None,
                 "supporting_runbook": state.get("runbook_id") or "KG-Memory"
             }],
-            "root_cause": root_cause,
+            "root_cause": root_cause if recall_conf >= DIAGNOSIS_CONFIDENCE else None,
             "diagnosis_mode": "KG-Memory-Recall",
             "diagnosis_loops": state.get("diagnosis_loops", 0) + 1,
             "diagnosis_summary": f"Retrived from KG-Memory: {root_cause}",
             "evidence_summary": "Matched previous successful incident in Neo4j",
-            "llm_suggested_action": action_taken
+            "llm_suggested_action": action_taken,
         }
 
 
