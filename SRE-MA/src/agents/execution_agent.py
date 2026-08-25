@@ -22,7 +22,7 @@ from src.graph.state import AgentState, ResolutionStatus
 from src.tools.sre_tool import execute_remediation, notify_slack, check_alert_status
 from src.tools.prometheus_tool import collect_incident_signals
 from src.tools.kg_tool import append_past_incident
-
+from src.graph.policy import idem_key
 
 from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS
 from src.graph.clear_time import build_clear_evidence
@@ -225,6 +225,8 @@ def execute_node(state: AgentState) -> dict:
 
     all_success = True
     updated_plan = []
+
+    executed_keys = list(state.get("executed_action_keys", []))
     
     #gate-2: executionm evidence list
     execution_evidence: List[Dict[str, Any]] = []
@@ -243,6 +245,11 @@ def execute_node(state: AgentState) -> dict:
 
     action_start_ts = datetime.datetime.utcnow()
     for action in action_plan:
+        key = idem_key(state["incident_id"], action)
+        if key in executed_keys:
+            print(f"[execute] idempotent skip: {key}")
+            updated_plan.append({**action, "executed": True, "result": "idempotent skip"})
+            continue
         if is_shadow:
             print(f"[execute] SHADOW: suppressing {action['action']}")
             result = {"success": True, "result": "shadow, no-op", "dry_run": True}
@@ -274,6 +281,8 @@ def execute_node(state: AgentState) -> dict:
             "executed": True,
             "result": result.get("result") or result.get("error"),
         })
+        if result.get("success"):
+            executed_keys.append(key)
 
     action_executed_at = datetime.datetime.utcnow()
     action_executed_at_iso = action_executed_at.isoformat()
@@ -359,6 +368,7 @@ def execute_node(state: AgentState) -> dict:
         gate3=g3,
         gate4_verified=gate4_verified,
         gate5_stable=gate5_stable,
+
         shadow_arm=(bool(state.get("shadow_execution"))),
     )
     print(f"[attribution] resolution_cause={resolution_cause} lead={g3.lead_seconds} reason={g3.reason}")
@@ -412,6 +422,7 @@ def execute_node(state: AgentState) -> dict:
         "gate3_temporal":g3.passed,
         "gate4_verified":gate4_verified,
         "gate5_stable":gate5_stable,
+        "executed_action_keys": executed_keys,
         
     }
 
