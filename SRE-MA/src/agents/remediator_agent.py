@@ -14,6 +14,9 @@ from src.graph.routing import classify_blast_radius, requires_human_approval
 #node: remediator 
 
 def remediator_node(state: AgentState) -> dict:
+    if state.get("action_plan"):
+        return {}
+        
     print(f"\n[remediator] Building action plan for {state['incident_id']}")
 
     consensus_rb = _check_correlated_rb_consensus(state)
