@@ -11,11 +11,16 @@ from src.agents.remediator_agent import remediator_node
 from src.agents.communicator_agent import communicator_node
 from src.agents.execution_agent import human_gate_node, execute_node
 from src.agents.escalation_agent import escalate_node
+from src.agents.deep_investigation import deep_investigation_node
+from src.agents.critic_agent import critic_node
+from src.graph.policy import policy_validator_node, route_after_policy
 
 from src.graph.routing import (
     route_after_diagnosis,
     route_after_remediator,
-    route_after_verification
+    route_after_verification,
+    route_after_investigation,
+    route_after_human_gate,
 )
 
 from src.observability.langfuse_logger import get_langfuse_handler, get_trace_id, log_incident_run
@@ -38,6 +43,9 @@ def build_graph() -> StateGraph:
     graph.add_node("detector", detector_node)
     graph.add_node("diagnoser", diagnoser_node)
     graph.add_node("llm_diagnoser", llm_diagnoser)
+    graph.add_node("deep_investigation", deep_investigation_node)
+    graph.add_node("critic", critic_node)
+    graph.add_node("policy_validator", policy_validator_node)
     graph.add_node("remediator", remediator_node)
     graph.add_node("communicator", communicator_node)
     graph.add_node("human_gate", human_gate_node)
@@ -46,60 +54,52 @@ def build_graph() -> StateGraph:
 
 
     graph.set_entry_point("detector")
-
     # detector -> diagnoser (always proceed to diagnosis to identify root cause)
     graph.add_edge("detector", "diagnoser")
 
     # diagnoser -> route based on confidence
-    graph.add_conditional_edges(
-        "diagnoser",
-        route_after_diagnosis,
-        {
+    graph.add_conditional_edges("diagnoser", route_after_diagnosis, {
             "remediator": "remediator",
-            "llm_diagnoser": "llm_diagnoser",
+            "llm_diagnoser": "deep_investigation",
             "escalate": "escalate"
-        }
-    )
+    })
+    
+    graph.add_conditional_edges("deep_investigation", route_after_investigation, {
+        "critic": "critic", 
+        "llm_diagnoser": "llm_diagnoser",
+    })
 
     # llm_diagnoser -> route based on confidence
-    graph.add_conditional_edges(
-        "llm_diagnoser",
-        route_after_diagnosis,
-        {
+    graph.add_conditional_edges("llm_diagnoser", route_after_diagnosis, {
             "remediator": "remediator",
             "llm_diagnoser": "llm_diagnoser",
             "escalate": "escalate"
-        }
-    )
+    })
 
     #communicator runs in parallel with remediator
     #communicator is triggered by detector as well it does not wait for root cause
     graph.add_edge("detector", "communicator")
+    graph.add_edge("critic", "remediator")
+    graph.add_edge("remediator", "policy_validator")
+    graph.add_conditional_edges("policy_validator", route_after_policy, {
+        "human_gate": "human_gate",
+        "execute": "execute",
+        "escalate": "escalate",
+    })
+
+    graph.add_conditional_edges("human_gate", route_after_human_gate, {
+        "execute": "execute", 
+        "escalate": "escalate", 
+    })
+    
+    graph.add_conditional_edges("execute", route_after_verification, {
+        "end_resolved": "communicator", 
+        "escalate_execution": "escalate",
+    })
+
+    graph.add_edge("escalate", "communicator")
     graph.add_edge("communicator", END)
 
-    # remediator -> human gate or execute
-    graph.add_conditional_edges(
-        "remediator",
-        route_after_remediator,
-        {
-            "human_gate": "human_gate",
-            "execute": "execute" 
-        }
-    )
-
-    #human gate -> execute (graph resumes here after /approve call)
-    graph.add_edge("human_gate", "execute")
-
-    graph.add_conditional_edges(
-        "execute",
-        route_after_verification,
-        {
-            "end_resolved": END,
-            "escalate_execution": "escalate"
-        }
-    )
-    
-    graph.add_edge("escalate", END)
 
     return graph
 
