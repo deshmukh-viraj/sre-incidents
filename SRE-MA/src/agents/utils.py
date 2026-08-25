@@ -29,7 +29,7 @@ def _get_llm(temperature: float = 0.1):
         ))
         if "nvidia" in primary_model:
             models.append(ChatOpenAI(
-                model="meta-llama/llama-3.3-70b-instruct:free",
+                model="liquid/lfm-2.5-2.6b:free",
                 temperature=temperature,
                 api_key=openrouter_key,
                 base_url=openrouter_base,
@@ -59,7 +59,7 @@ def _get_llm(temperature: float = 0.1):
         exceptions_to_handle=(Exception, OpenAIAuthError),
     )
 
-#print(_get_llm().invoke('what is your name??').content)
+# print(_get_llm().invoke('what is your name??').content)
 
 def parse_json_from_llm(raw_text: str) -> dict:
     """
