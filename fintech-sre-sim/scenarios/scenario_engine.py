@@ -364,6 +364,40 @@ SCENARIO_NATURAL_CALM_TRANSIENT_SPIKE = Scenario(
     ],
 )
 
+#novel scenario
+SCENARIO_NOVEL_MULTI_SIGNAL_DEGRADATION = Scenario(
+    id="NO-0001",
+    name="novel_multi_signal_degradation",
+    description="Ambiguous multi-signal degradation causing correlated latency spikes and DB pool saturation without standard runbook patterns.",
+    root_cause="Concurrent DB connection pool saturation in account_ledger combined with payment gateway downstream thread contention.",
+    expected_alerts=[],
+    slo_impact="Latency & Availability SLO degradation: payment_gateway p99 > 3.5s and elevated error rates.",
+    phases=[
+        ScenarioPhase(
+            name="ambiguous_onset",
+            duration_seconds=30,
+            interruptible=True,
+            latency_multiplier={"payment_gateway": 3.5},
+            error_rate_override={"payment_gateway": 0.03},
+            db_pool_saturation={"postgres_primary": 0.55},
+        ),
+        ScenarioPhase(
+            name="sustained_ambiguous",
+            duration_seconds=-1,
+            interruptible=True,
+            latency_multiplier={"payment_gateway": 3.2},
+            error_rate_override={"payment_gateway": 0.036},
+            db_pool_saturation={"postgres_primary": 0.60},
+        ),
+        ScenarioPhase(
+            name="resolved",
+            duration_seconds=15,
+            interruptible=True,
+            latency_multiplier={"payment_gateway": 1.0},
+        ),
+    ],
+)
+
 ALL_SCENARIOS = {
     s.name: s for s in [
         SCENARIO_PAYMENT_LATENCY_SPIKE,
@@ -374,6 +408,7 @@ ALL_SCENARIOS = {
         SCENARIO_FRAUD_MODEL_DEGRADATION,
         SCENARIO_CASCADING_FAILURE,
         SCENARIO_NATURAL_CALM_TRANSIENT_SPIKE,
+        SCENARIO_NOVEL_MULTI_SIGNAL_DEGRADATION,
     ]
 }
 
