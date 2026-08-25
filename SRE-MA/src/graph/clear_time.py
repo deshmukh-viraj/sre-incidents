@@ -181,7 +181,7 @@ def build_clear_evidence(
     samples = fetch(expr, a_start - pre_window_sec, _to_unix(t_now), step, **fetch_kwargs)
 
     # in simulation prometheus has no range history; fall back to polled timestamp
-    # ceiling: if both are missing we truly can't attribute (Gate 3 will fail correctly)
+    # ceiling: if both are missing we truly can't attribute (gate 3 will fail correctly)
     if not samples and t_clear_polled is not None:
         ev = ClearEvidence(
             t_clear_true=_to_unix(t_clear_polled),
@@ -192,6 +192,11 @@ def build_clear_evidence(
         return ev
 
     ev = find_true_clear_time(samples, threshold, consecutive=consecutive, comparison=comparison)
+    #if range history lacks consecutive samples but live verification succeeded, fall back to polled t_clear
+    if ev.t_clear_true is None and t_clear_polled is not None:
+        ev.t_clear_true = _to_unix(t_clear_polled)
+        ev.clear_source = CLEAR_SOURCE_POLLED
+        ev.notes.append("prometheus range query returned insufficient samples; using polled t_clear as fallback")
 
     pre = [(ts, v) for ts, v in samples if ts <= a_start]
     per_action_healthy, trend, already_healing = analyse_pre_action(pre, threshold, comparison=comparison)
