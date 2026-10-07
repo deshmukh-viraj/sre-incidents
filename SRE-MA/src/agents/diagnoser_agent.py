@@ -29,7 +29,7 @@ from src.graph.state import AgentState
 from src.graph.routing import deterministic_diagnosis, DIAGNOSIS_CONFIDENCE
 from src.tools.kg_tool import query_knowledge_graph
 from src.tools.sre_tool import lookup_runbook
-from src.agents.utils import _get_llm, parse_json_from_llm
+from src.agents.utils import _get_llm, DiagnoserOutput, calculate_cost
 
 load_dotenv()
 
@@ -47,6 +47,31 @@ def diagnoser_node(state: AgentState) -> dict:
     result = deterministic_diagnosis(state)
     if result:
         confidence = result.get("confidence", 0)
+
+        if result.get("residual_gate_failed"):
+            print(
+                f"[diagnoser] Pattern matched {result['supporting_runbook']} but residual check "
+                f"failed (confidence={confidence:.2f}). Routing to llm_diagnoser."
+            )
+            return {
+                "hypotheses": [{
+                    "hypothesis": result["hypothesis"],
+                    "evidence": [e for e in result.get("evidence", []) if e],
+                    "confidence": confidence,
+                    "alternative": result.get("alternative"),
+                    "supporting_runbook": result.get("supporting_runbook"),
+                }],
+                "root_cause": None,
+                "diagnosis_mode": "pending_llm",
+                "diagnosis_loops": state.get("diagnosis_loops", 0) + 1,
+                "diagnosis_summary": (
+                    f"Residual gate: {result['supporting_runbook']} cannot explain all live signals"
+                ),
+                "evidence_summary": "\n".join(
+                    f" - {e}" for e in result.get("evidence", []) if e
+                ),
+            }
+
         print(f"[diagnoser] Pattern matched: {result['hypothesis'][:60]} (confidence={confidence:.2f})")
 
         evidence_list = [e for e in result.get("evidence", []) if e]
@@ -213,27 +238,25 @@ Diagnose this incident. Return JSON ONLY.
 """
 
     try:
-        resp = llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
-        raw_json = resp.content.strip()
+        structured_llm = llm.with_structured_output(DiagnoserOutput)
+        resp = structured_llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
 
-        parsed = parse_json_from_llm(raw_json)
-        if not parsed:
-            print("[llm_diagnoser] WARNING: Could not parse valid JSON from LLM response")
-        hypotheses = parsed.get("hypotheses", [])
-        root_cause = parsed.get("root_cause")
-        llm_action = parsed.get("suggested_remediation_from_context")
-        diagnosis_summary = parsed.get("diagnosis_summary")
-        evidence_summary = parsed.get("evidence_summary")
-        blast_analysis = parsed.get("blast_analysis")
+        hypotheses = [h.model_dump() for h in resp.hypotheses]
+        root_cause = resp.root_cause
+        llm_action = resp.suggested_remediation_from_context
+        diagnosis_summary = resp.diagnosis_summary
+        evidence_summary = resp.evidence_summary
+        blast_analysis = resp.blast_analysis
 
-        # token tracking
+        # token tracking using usage_metadata from response
         usage = resp.response_metadata.get("token_usage", {})
-        new_tokens = usage.get("total_tokens", 0)
-        cost = new_tokens * 0.000015
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cost = calculate_cost(input_tokens, output_tokens)
         max_conf = max((h.get("confidence", 0) for h in hypotheses), default=0)
 
         print(f"[llm_diagnoser] Root cause: {root_cause[:60] if root_cause else 'None'}")
-        print(f"[llm_diagnoser] Max confidence: {max_conf:.2f} | tokens: {new_tokens}")
+        print(f"[llm_diagnoser] Max confidence: {max_conf:.2f} | in={input_tokens} out={output_tokens}")
         if llm_action:
             print(f"[llm_diagnoser] KG action: {llm_action[:80]}")
 
@@ -247,7 +270,9 @@ Diagnose this incident. Return JSON ONLY.
             "diagnosis_mode": "llm",
             "diagnosis_loops": state.get("diagnosis_loops", 0) + 1,
             "model_used": os.getenv("LLM_MODEL", "llama3-70b-8192"),
-            "total_tokens_used": state.get("total_tokens_used", 0) + new_tokens,
+            "total_tokens_used": state.get("total_tokens_used", 0) + input_tokens + output_tokens,
+            "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
+            "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
             "token_cost_usd": state.get("token_cost_usd", 0.0) + cost,
         }
 
