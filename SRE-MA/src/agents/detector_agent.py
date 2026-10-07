@@ -3,13 +3,9 @@ agents/detector_agent.py
 ------------------------
 detector agent: first node in the LangGraph pipeline.
 
-responsibility:
-    - collect prometheus metrics + loki log patterns via collect_all_signals
-    - infer affected service from alert name if not explicitly set
-    - classify severity from numeric signals only (no LLM)
-
-writes to state:
-    raw_signals, severity, affected_services, resolution_status
+grabs all the important metrics for a service iin one go.
+return dict so the detector agent has an easy time.
+these are "seed calls" deterministic baseline metric, fetched before any LLM reasoning
 """
 
 from src.graph.state import AgentState, ResolutionStatus
@@ -41,6 +37,7 @@ def detector_node(state: AgentState) -> dict:
 
     print(f"[detector] Severity: {severity} | service: {service}")
     print(f"[detector] p99={raw.get('p99_latency_s')} error_rate={raw.get('error_rate')}")
+    print(f"[detector] db_pool={raw.get('db_pool_utilization')} circuit_breaker={raw.get('circuit_breaker_state')}")
 
     is_shadow = bool(state.get("shadow_execution", False) or raw.get("shadow_execution", False))
     raw["shadow_execution"] = is_shadow
