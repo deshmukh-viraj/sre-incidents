@@ -49,11 +49,11 @@ def escalate_node(state: AgentState) -> dict:
     elif state.get("verified") == False and state.get("action_taken"):
         reason = "REMEDIATION_FAILED"
         action_taken = state.get("action_taken")
-        current_p99 = state.get("current_metrics", {}).get("p99_latency_s", "N/A")
+        current_p99 = state.get("final_p99_latency_s", "N/A")
 
         message = (
             f" *AI Remediation Failed*\n"
-            f"Incident: {incident_id} | Severity: {severity}"
+            f"Incident: {incident_id} | Severity: {severity}\n"
             f"Alert: {alert_name}\n"
             f"Action Attempted: {action_taken}\n"
             f"Current P99: {current_p99}s (still breaching)\n"
