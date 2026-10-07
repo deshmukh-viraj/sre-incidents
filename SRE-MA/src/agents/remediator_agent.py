@@ -8,7 +8,7 @@ from typing import Optional
 import json
 import os
 from src.graph.state import AgentState
-from src.graph.routing import classify_blast_radius, requires_human_approval
+from src.graph.routing import classify_blast_radius, requires_human_approval, DIAGNOSIS_CONFIDENCE
 
 
 #node: remediator 
@@ -33,6 +33,11 @@ def remediator_node(state: AgentState) -> dict:
     best = max(hypotheses, key=lambda h:h.get("confidence", 0))
     runbook = consensus_rb or state.get("runbook_id") or best.get("supporting_runbook")
     llm_action = state.get("llm_suggested_action")
+
+    #if confidence is below threshold and no LLM action was proposed, do not execute Path A
+    if best.get("confidence", 0) < DIAGNOSIS_CONFIDENCE and not llm_action:
+        print(f"[remediator] Low confidence ({best.get('confidence', 0):.2f} < {DIAGNOSIS_CONFIDENCE}) and no LLM proposal -> no auto runbook")
+        return {"action_plan": [], "requires_approval": True}
 
     #path A: known resolution
     action_plan = _build_action_plan(runbook, state)
@@ -145,6 +150,28 @@ def _build_safe_mitigation(state: AgentState) -> list:
             "result": None,
         }]
 
+    # SEV2 -> capture diagnostics + notify
+    if severity == "SEV2":
+        return [{
+            "action": "Notify on-call and capture diagnostics",
+            "tool": "notify",
+            "params": {"channel": "incidents", "severity": "warning", "message": f"SEV2 incident on {service} requires investigation"},
+            "blast_radius": "pod",
+            "reversible": True,
+            "requires_approval": False,
+            "executed": False,
+            "result": None,
+        }, {
+            "action": "Capture thread dump and heap diagnostics",
+            "tool": "capture_diagnostics",
+            "params": {"service": service},
+            "blast_radius": "pod",
+            "reversible": True,
+            "requires_approval": False,
+            "executed": False,
+            "result": None,
+        }]
+
     # default -> capture diagnostics for human investigation
     return [{
         "action": "Capture thread dump and heap diagnostics",
@@ -156,6 +183,7 @@ def _build_safe_mitigation(state: AgentState) -> list:
         "executed": False,
         "result": None,
     }]
+
 
 def _check_correlated_rb_consensus(state: AgentState) -> Optional[str]:
     """
