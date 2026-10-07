@@ -1,9 +1,11 @@
 import os
 import json
 import re
+from typing import Optional, List
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 try:
     from openai import AuthenticationError as OpenAIAuthError
 except ImportError:
@@ -11,129 +13,69 @@ except ImportError:
 
 load_dotenv()
 
+#cost accounting
+INPUT_RATE_PER_1K = 0.001
+OUTPUT_RATE_PER_1K = 0.004
+
+
+#pydantic schemas for structured llm output
+
+class Hypothesis(BaseModel):
+    hypothesis: str = Field(description="Plain English root cause")
+    evidence: List[str] = Field(default_factory=list, description="Supporting signals/logs")
+    confidence: float = Field(ge=0.0, le=1.0)
+    alternative: Optional[str] = None
+    supporting_runbook: Optional[str] = None
+
+
+class DiagnoserOutput(BaseModel):
+    hypotheses: List[Hypothesis] = Field(default_factory=list)
+    root_cause: Optional[str] = None
+    diagnosis_summary: Optional[str] = None
+    evidence_summary: Optional[str] = None
+    blast_analysis: Optional[str] = None
+    suggested_remediation_from_context: Optional[str] = None
+
+
+class CommunicatorOutput(BaseModel):
+    status_page_update: str
+    war_room_summary: str
+    escalation_message: Optional[str] = None
+
+
+def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str = None, is_groq: bool = False):
+    if is_groq:
+        return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=3, stream_usage=True)
+    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=5, api_key=api_key, base_url=base_url, stream_usage=True)
+
+
 def _get_llm(temperature: float = 0.1):
-    # fallback llms to prevent 502/ResourceExhausted from a single free endpoint
     primary_model = os.getenv("LLM_MODEL_OPENROUTER", "nvidia/nemotron-3-ultra-550b-a55b:free")
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     openrouter_base = os.getenv("OPENAI_API_BASE")
     groq_key = os.getenv("GROQ_API_KEY")
+    cc_key = os.getenv("CODECRAFT_API_KEY")
+    base_url = os.getenv("base_url") or openrouter_base
+    primary_model_cc = os.getenv("LLM_MODEL_CC", "deepseek-v4-flash-0731")
 
     models = []
+    if cc_key:
+        models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, is_groq=False))
     if openrouter_key:
-        models.append(ChatOpenAI(
-            model=primary_model,
-            temperature=temperature,
-            max_retries=5,
-            api_key=openrouter_key,
-            base_url=openrouter_base,
-        ))
+        models.append(_create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False))
         if "nvidia" in primary_model:
-            models.append(ChatOpenAI(
-                model="liquid/lfm-2.5-2.6b:free",
-                temperature=temperature,
-                api_key=openrouter_key,
-                base_url=openrouter_base,
-            ))
-
+            models.append(_create_llm("liquid/lfm-2.5-2.6b:free", temperature, openrouter_key, openrouter_base, is_groq=False))
     if groq_key:
-        models.append(ChatGroq(
-            model=os.getenv("LLM_MODEL_GROQ", "llama3-70b-8192"),
-            temperature=temperature,
-            api_key=groq_key,
-        ))
-
+        models.append(_create_llm(os.getenv("LLM_MODEL_GROQ", "llama-3.3-70b-versatile"), temperature, groq_key, is_groq=True))
     if not models:
-        return ChatOpenAI(
-            model=primary_model,
-            temperature=temperature,
-            api_key=openrouter_key,
-            base_url=openrouter_base,
-        )
+        return _create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False)
 
     primary = models[0]
     if len(models) <= 1:
         return primary
+    return primary.with_fallbacks(models[1:], exceptions_to_handle=(Exception, OpenAIAuthError))
 
-    return primary.with_fallbacks(
-        models[1:],
-        exceptions_to_handle=(Exception, OpenAIAuthError),
-    )
 
-# print(_get_llm().invoke('what is your name??').content)
-
-def parse_json_from_llm(raw_text: str) -> dict:
-    """
-    robust extraction and repair for LLM JSON responses (handles markdown, 
-    unescaped quotes, trailing commas, missing commas, and truncated JSON).
-    """
-    if not raw_text or not raw_text.strip():
-        return {}
-
-    text = raw_text.strip()
-    
-    # Trim leading text before first { or [
-    first_brace = text.find('{')
-    first_bracket = text.find('[')
-    indices = [i for i in (first_brace, first_bracket) if i != -1]
-    if indices:
-        text = text[min(indices):]
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    cleaned = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
-    cleaned = re.sub(r'```\s*$', '', cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r',\s*([\}\]])', r'\1', cleaned)
-    cleaned = re.sub(r'("\s*|\b(?:true|false|null|\d+(?:\.\d+)?)\s*)\n?(\s*")', r'\1,\2', cleaned)
-
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    stack = []
-    in_string = False
-    escape = False
-    repaired_chars = []
-
-    for char in cleaned:
-        if escape:
-            escape = False
-            repaired_chars.append(char)
-            continue
-        if char == '\\' and in_string:
-            escape = True
-            repaired_chars.append(char)
-            continue
-        if char == '"':
-            in_string = not in_string
-            repaired_chars.append(char)
-            continue
-        if in_string:
-            repaired_chars.append(char)
-            continue
-        if char in '{[':
-            stack.append('}' if char == '{' else ']')
-            repaired_chars.append(char)
-        elif char in '}]':
-            if stack and stack[-1] == char:
-                stack.pop()
-            repaired_chars.append(char)
-        else:
-            repaired_chars.append(char)
-
-    if in_string:
-        repaired_chars.append('"')
-
-    repaired_str = "".join(repaired_chars).strip()
-    repaired_str = re.sub(r',\s*$', '', repaired_str)
-
-    while stack:
-        repaired_str += stack.pop()
-
-    try:
-        return json.loads(repaired_str)
-    except json.JSONDecodeError:
-        return {}
+def calculate_cost(input_tokens: int, output_tokens: int, model_name: str = None) -> float:
+    """OpenSRE cost: per-direction pricing, no flat-rate estimation."""
+    return (input_tokens * INPUT_RATE_PER_1K + output_tokens * OUTPUT_RATE_PER_1K) / 1000.0
