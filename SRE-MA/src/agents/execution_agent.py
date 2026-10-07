@@ -193,7 +193,7 @@ def _signal_expr(service: str, signal: Optional[str]) -> tuple[str, float, str]:
     if signal == "error_rate":
         expr = (
             f'sum(rate(http_requests_total{{service="{service}", status_code=~"5.."}}[1m])) '
-            f'/ sum(rate(https_requests_total{{service="{service}"}}[1m]))'
+            f'/ sum(rate(http_requests_total{{service="{service}"}}[1m]))'
         )
         return expr, ERROR_RATE_WARNING, "below"
     
