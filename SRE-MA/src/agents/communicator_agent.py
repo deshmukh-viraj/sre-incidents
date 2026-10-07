@@ -19,7 +19,7 @@ import json
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from src.graph.state import AgentState
-from src.agents.utils import _get_llm, parse_json_from_llm
+from src.agents.utils import _get_llm, CommunicatorOutput, calculate_cost
 
 load_dotenv()
 
@@ -62,20 +62,21 @@ Return this exact JSON structure:
 }}"""
 
     try:
-        resp = llm.invoke([HumanMessage(content=prompt)])
-        raw  = resp.content.strip()
-
-        parsed = parse_json_from_llm(raw)
+        structured_llm = llm.with_structured_output(CommunicatorOutput)
+        resp = structured_llm.invoke([HumanMessage(content=prompt)])
 
         usage = resp.response_metadata.get("token_usage", {})
-        new_tokens = usage.get("total_tokens", 0)
-        cost = new_tokens * 0.000015
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        cost = calculate_cost(input_tokens, output_tokens)
 
         return {
-            "status_page_update": parsed.get("status_page_update"),
-            "war_room_summary": parsed.get("war_room_summary"),
-            "escalation_message": parsed.get("escalation_message") if severity in ("SEV1", "SEV2") else None,
-            "total_tokens_used": state.get("total_tokens_used", 0) + new_tokens,
+            "status_page_update": resp.status_page_update,
+            "war_room_summary": resp.war_room_summary,
+            "escalation_message": resp.escalation_message if severity in ("SEV1", "SEV2") else None,
+            "total_tokens_used": state.get("total_tokens_used", 0) + input_tokens + output_tokens,
+            "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
+            "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
             "token_cost_usd": state.get("token_cost_usd", 0.0) + cost,
         }
 
