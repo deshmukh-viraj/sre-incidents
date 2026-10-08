@@ -58,7 +58,7 @@ ALERT_CORRELATION_WINDOW = {
 }
 DEFAULT_CORRELATION_WINDOW = 300 #fall back to existing debounce_sec value
 
-NOVEL_DB_PRESSURE = 0.50
+NOVEL_DB_PRESSURE = 0.80
 RUNBOOK_EXPLAINS = {
     "RB-001": {"p99", "error", "throttle_rate"},
     "RB-002": {"circuit_breaker", "error_rate", "p99", "db_pool"},
@@ -73,8 +73,8 @@ def _anomalous_sig(state: AgentState):
     out = {}
     if (s.get("p99_latency_s") or 0) >= P99_LATENCY_WARNING: out["p99"] = 1
     if (s.get("error_rate") or 0) >= ERROR_RATE_WARNING: out["error"] = 1
-    if (s.get("throttle_error_rate") or 0) >= THROTTLE_RATE_HIGH: out["throttle"] = 1
-    if (s.get("db_pool_utilization") or 0) >= DB_POOL_WARNING: out["db_pool"] = 1
+    if (s.get("throttle_error_rate") or 0) >= THROTTLE_RATE_HIGH: out["throttle_rate"] = 1
+    if (s.get("db_pool_utilization") or 0) >= NOVEL_DB_PRESSURE: out["db_pool"] = 1
     if (s.get("circuit_breaker_state") or 0) > CIRCUIT_BREAKER_OPEN: out["circuit_breaker"] = 1
     if (s.get("payment_decline_rate") or 0) >= DECLINE_RATE_HIGH: out["decline_rate"] = 1
     if lp.get("auth_failures", 0) >= 50: out["auth_failures"] = 1
@@ -83,13 +83,36 @@ def _anomalous_sig(state: AgentState):
 
 
 def _apply_residual_check(result: dict, state: AgentState) -> dict:
-    """novelty/ood gate: cap confidence when matched rb cannot explain every live anomaly"""
-    if result and (explains := RUNBOOK_EXPLAINS.get(result.get("supporting_runbook"))) is not None:
-        if unexplained := (_anomalous_sig(state).keys() - explains):
-            result["confidence"] = min(result.get("confidence", 1.0), 0.65)
-        result["evidence"] = (result.get("evidence") or []) + [
-                f"UNEXPLAINED by {result['supporting_runbook']}: {', '.join(unexplained)}"
-        ]
+    """
+    novelty/ood gate: cap confidence when matched rb cannot explain every live anomaly.
+
+    uses NOVEL_DB_PRESSURE (0.50) — not DB_POOL_WARNING (0.85) — so sub-warning
+    db pressure on a non-db runbook still counts as contradictory evidence.
+    """
+    if not result:
+        return result
+    explains = RUNBOOK_EXPLAINS.get(result.get("supporting_runbook"))
+    if explains is None:
+        return result
+
+    anomalous = _anomalous_sig(state)
+    unexplained = sorted(anomalous.keys() - explains)
+    if not unexplained:
+        return result
+
+    result["confidence"] = min(result.get("confidence", 1.0), 0.65)
+    result["residual_gate_failed"] = True
+    notes = []
+    if "db_pool" in unexplained:
+        notes.append(
+            f"Unexplained DB pressure detected "
+            f"(db_pool_utilization={state.get('raw_signals', {}).get('db_pool_utilization')}, "
+            f"novel threshold={NOVEL_DB_PRESSURE})"
+        )
+    other = [u for u in unexplained if u != "db_pool"]
+    if other:
+        notes.append(f"UNEXPLAINED by {result['supporting_runbook']}: {', '.join(other)}")
+    result["evidence"] = (result.get("evidence") or []) + notes
     return result
 
 # severity classification (after detector collects signals)
@@ -375,7 +398,9 @@ def route_after_verification(state: AgentState) -> Literal["end_resolved", "esca
 def route_after_investigation(state) -> Literal["critic", "llm_diagnoser"]:
     """harness failure (diagnosisi_mode == 'pending_llm') degrades to legacy on shot"""
     if state.get("diagnosis_mode") == "pending_llm":
+        print(f"[router] deep_investigation -> llm_diagnoser (pending_llm)")
         return "llm_diagnoser"
+    print(f"[router] deep_investigation -> critic (mode={state.get('diagnosis_mode')})")
     return "critic"
 
 
