@@ -62,10 +62,11 @@ Return this exact JSON structure:
 }}"""
 
     try:
-        structured_llm = llm.with_structured_output(CommunicatorOutput)
-        resp = structured_llm.invoke([HumanMessage(content=prompt)])
+        structured_llm = llm.with_structured_output(CommunicatorOutput, include_raw=True)
+        resp_dict = structured_llm.invoke([HumanMessage(content=prompt)])
+        resp, raw_msg = resp_dict["parsed"], resp_dict["raw"]
 
-        usage = resp.response_metadata.get("token_usage", {})
+        usage = raw_msg.usage_metadata or raw_msg.response_metadata.get("token_usage", {})
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
         cost = calculate_cost(input_tokens, output_tokens)
