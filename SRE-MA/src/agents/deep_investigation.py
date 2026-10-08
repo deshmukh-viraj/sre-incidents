@@ -21,6 +21,7 @@ from src.graph.routing import (
     DB_POOL_WARNING, CIRCUIT_BREAKER_OPEN, DECLINE_RATE_HIGH,
     classify_blast_radius,
 )
+from src.agents.utils import calculate_cost
 
 MAX_ROUNDS, MAX_TOKEN = 4, 20_000
 STAGNATION_THRESHOLD = 2
