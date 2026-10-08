@@ -1,5 +1,5 @@
 groups:
-  # Payment Gateway SLO Alerts
+  #payment gateway SLO alerts
 
   - name: payment_gateway_slo
     interval: 30s
@@ -73,7 +73,7 @@ groups:
             At this rate, the monthly error budget will be exhausted in ~1h.
 
  
-  # Circuit Breaker Alerts
+  #circuit breaker alerts
   - name: circuit_breakers
     interval: 15s
     rules:
@@ -104,7 +104,7 @@ groups:
           description: "Failure rate: {{ $value | humanizePercentage }}"
 
   
-  # Database Alerts
+  #database alerts
   - name: database
     interval: 30s
     rules:
@@ -165,7 +165,7 @@ groups:
           summary: "Account ledger p99 > 2s — likely DB pressure"
 
  
-  # Security / Data Exfiltration Alerts
+  #security / data exfiltration alerts
 
   - name: security
     interval: 15s
@@ -214,7 +214,7 @@ groups:
           summary: "Compliance audit event volume spike — audit may be in progress"
 
  
-  # Fraud Model Alerts
+  #fraud model alerts
   
   - name: fraud_model
     interval: 60s
@@ -249,7 +249,7 @@ groups:
           description: "p99: {{ $value | humanizeDuration }} — model serving may be degraded"
 
 
-  # Infrastructure / SLO Budget
+#infrastructure / SLO Budget
  
   - name: infrastructure
     interval: 60s
@@ -265,7 +265,7 @@ groups:
         annotations:
           summary: "{{ $labels.service }} memory above 800MB"
           description: "RSS: {{ $value | humanize1024 }}B — possible memory leak"
-
+ 
       - alert: SLOErrorBudgetLow
         expr: slo_error_budget_remaining_ratio < 0.20
         for: 0m
@@ -277,7 +277,7 @@ groups:
           description: |
             {{ $value | humanizePercentage }} of error budget remaining.
             Consider freeze on non-critical deployments.
-
+ 
       - alert: SLOErrorBudgetExhausted
         expr: slo_error_budget_remaining_ratio < 0.01
         for: 0m
@@ -287,3 +287,28 @@ groups:
         annotations:
           summary: "{{ $labels.service }} SLO error budget EXHAUSTED"
           description: "Immediate freeze on all changes. Escalate to engineering leadership."
+ 
+  #novel/Unknown catch all for scenarios with no matching runbook
+  #this rule has NO runbook label, so it routes through   unlabeled novel path  
+  - name: novel_unknown
+    interval: 30s
+    rules:
+      - alert: SLOBurnUnknown
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{service="payment_gateway"}[5m]))
+            by (le)
+          ) > 1.0
+          and on()
+          db_connection_pool_active{db="postgres_primary",pool="main"}
+          / db_connection_pool_max{db="postgres_primary",pool="main"} > 0.50
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Payment gateway p99 elevated with concurrent DB pool pressure — no matching runbook"
+          description: |
+            p99 latency is {{ $value | humanizeDuration }} (threshold: 1.0s) AND
+            DB postgres_primary pool utilization is elevated.
+            This pattern matches no existing runbook — requires novel investigation.
