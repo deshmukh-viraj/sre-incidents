@@ -238,8 +238,9 @@ Diagnose this incident. Return JSON ONLY.
 """
 
     try:
-        structured_llm = llm.with_structured_output(DiagnoserOutput)
-        resp = structured_llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
+        structured_llm = llm.with_structured_output(DiagnoserOutput, include_raw=True)
+        resp_dict = structured_llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
+        resp, raw_msg = resp_dict["parsed"], resp_dict["raw"]
 
         hypotheses = [h.model_dump() for h in resp.hypotheses]
         root_cause = resp.root_cause
@@ -249,7 +250,7 @@ Diagnose this incident. Return JSON ONLY.
         blast_analysis = resp.blast_analysis
 
         # token tracking using usage_metadata from response
-        usage = resp.response_metadata.get("token_usage", {})
+        usage = raw_msg.usage_metadata or raw_msg.response_metadata.get("token_usage", {})
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
         cost = calculate_cost(input_tokens, output_tokens)
