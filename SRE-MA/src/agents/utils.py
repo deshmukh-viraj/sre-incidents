@@ -79,3 +79,34 @@ def _get_llm(temperature: float = 0.1):
 def calculate_cost(input_tokens: int, output_tokens: int, model_name: str = None) -> float:
     """OpenSRE cost: per-direction pricing, no flat-rate estimation."""
     return (input_tokens * INPUT_RATE_PER_1K + output_tokens * OUTPUT_RATE_PER_1K) / 1000.0
+
+
+def _extract_usage(msg) -> tuple[int, int]:
+    """xtract (input_tokens, output_tokens) from a message's usage_metadata.
+    handles double-counting: if input_token_details exists, use its input_tokens
+    as fallback ONLY when flat input_tokens is absent/zero. Never add both.
+    """
+    usage = getattr(msg, "usage_metadata", None) or {}
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+
+    # this avoids double-counting since input_token_details.input_tokens is a subset of input_tokens
+    if input_tokens == 0:
+        details = usage.get("input_token_details", {}) or {}
+        input_tokens = details.get("input_tokens", 0)
+    if output_tokens == 0:
+        details = usage.get("output_token_details", {}) or {}
+        output_tokens = details.get("output_tokens", 0)
+    
+    return input_tokens, output_tokens
+
+
+def _accumulate_usage(messages: list) -> tuple[int, int]:
+    """sum input/output tokens across all messages, avoiding doublecounting."""
+    total_input = 0
+    total_output = 0
+    for m in messages:
+        inp, out = _extract_usage(m)
+        total_input += inp
+        total_output += out
+    return total_input, total_output
