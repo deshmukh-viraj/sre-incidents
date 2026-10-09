@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 import re
-from src.agents.utils import _get_llm
+from src.agents.utils import _get_llm, calculate_cost, _accumulate_usage
 from src.tools.agent_tool import ALL_TOOLS, READ_TOOLS, propose_remediation, escalate_with_reason
 from src.tools.kg_tool import SERVICE_METRICS
 from src.graph.routing import (
@@ -182,8 +182,7 @@ def deep_investigation_node(state) -> dict:
 
     #cost accounting
     model_name = next((getattr(m, "response_metadata", {}).get("model_name") or getattr(m, "response_metadata", {}).get("model") for m in reversed(msgs) if getattr(m, "response_metadata", None)), None)
-    input_tokens = sum((getattr(m, "usage_metadata", None) or {}).get("input_tokens", 0) for m in msgs)
-    output_tokens = sum((getattr(m, "usage_metadata", None) or {}).get("output_tokens", 0) for m in msgs)
+    input_tokens, output_tokens = _accumulate_usage(msgs)
     cost = calculate_cost(input_tokens, output_tokens, model_name)
 
     # detect stagnation: all tool calls in this run were cache hits
