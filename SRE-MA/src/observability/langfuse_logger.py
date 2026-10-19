@@ -12,7 +12,7 @@ covers all the requirements
 import os
 from typing import Optional, Dict, Any, List
 from pathlib import Path
-from langfuse import Langfuse
+from langfuse import Langfuse, propagate_attributes
 from langfuse.langchain import CallbackHandler
 from dotenv import load_dotenv
 
@@ -37,25 +37,32 @@ def get_langfuse_handler(
     session_id: str,
     alert_name: str = "unknown",
     scenario_name: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ) -> CallbackHandler:
     """
-    returns a callback hanfdler scoped to one incident
-    pass this into th graph invoke config
+    returns a callback handler scoped to one incident.
+    if trace_id is provided, links callback events to the existing trace.
     """
     tags = ["sre-agent", alert_name]
     if scenario_name:
         tags.append(f"scenario: {scenario_name}")
 
-    return CallbackHandler()
+    trace_context = {"trace_id": trace_id} if trace_id else None
+    return CallbackHandler(trace_context=trace_context)
 
 
-def get_trace_id(hanfdler: CallbackHandler) -> Optional[str]:
+def get_trace_id(handler: CallbackHandler) -> Optional[str]:
     """
     pulls the trace_id generated for thi incident's invoke call, so we can attach
     feedback later using langfuse SDK.
     """
     try:
-        return hanfdler.get_trace_id()
+        if hasattr(handler, "last_trace_id") and handler.last_trace_id:
+            return handler.last_trace_id
+        if hasattr(handler, "get_trace_id"):
+            return handler.get_trace_id()
+        client = _get_client()
+        return client.get_current_trace_id()
     except Exception as e:
         print(f"[langfuse_logger] Warning: failed to capture trace_id: {e}")
         return None
@@ -79,6 +86,7 @@ def log_incident_run(
     """
     attaches per incident sre metrics as scores on the trace
     extracts data directly from the final agentstate dictionary
+    sets trace-level userId and sessionId for proper Langfuse tracking
     """
     if not trace_id:
         print(f"[Langfuse] No trace_id found, skipping incident logging")
@@ -97,34 +105,85 @@ def log_incident_run(
     #determine if it was success (only RESOLVED counts, ESCALATED/FAILED do not count)
     is_resolved = 1.0 if resolution_status and resolution_status.upper() == "RESOLVED" else 0.0
 
+    #escalation with evidence tracking  
+    has_evidence = (
+        result.get("root_cause") is not None or
+        result.get("investigation_steps", 0) > 0 or
+        result.get("evidence_summary") is not None or
+        len(result.get("hypotheses", [])) > 0
+    )
+
+    #determine escalation level
+    if is_resolved == 1.0:
+        escalation_class = "resolved"
+    elif has_evidence:
+        escalation_class = "escalated_with_evidence"
+    else:
+        escalation_class = "escalated_without_evidence"
+
+    #log ERROR/WARNING for escalations
+    if escalation_class == "escalated_without_evidence":
+        client.log_level = "ERROR"
+        level = "ERROR"
+    elif escalation_class == "escalated_with_evidence":
+        client.log_level = "WARNING"
+        level = "WARNING"
+    else:
+        level = "INFO"
+
     try:
-        #log numeric sre metrics using v4.x score_current_trace
+        #log sre metrics using  score_current_trace
         client.score_current_trace(name="mttr_seconds", value=float(result.get("mttr_seconds") or 0), data_type="NUMERIC")
         client.score_current_trace(name="token_cost_usd", value=float(result.get("token_cost_usd") or 0), data_type="NUMERIC")
         client.score_current_trace(name="max_confidence", value=float(confidence or 0), data_type="NUMERIC")
         client.score_current_trace(name="diagnosis_loops", value=float(result.get("diagnosis_loops") or 0), data_type="NUMERIC")
         client.score_current_trace(name="resolution_status", value=is_resolved, data_type="NUMERIC")
 
-        # log grund truth comparison
+        #log escalation class
+        if escalation_class != "resolved":
+            client.score_current_trace(
+                name="escalation_class",
+                value=escalation_class,
+                data_type="CATEGORICAL",
+
+            )
+            
+        #log ground truth comparison
         if scenario_name:
             expected_runbook = SCENARIO_EXPECTED_RUNBOOK.get(scenario_name, "unknown")
             if expected_runbook and diagnosed_runbooks:
                 is_correct = 1.0 if expected_runbook in diagnosed_runbooks else 0.0
                 client.score_current_trace(name="ground_truth_match", value=is_correct, data_type="NUMERIC")
 
-        # update current span metadata (replaces old client.trace() call)
+        #set trace-level fields: userid, sessionid at trace level, tags preserved
+        incident_id = result.get("incident_id", "unknown")
+        service = result.get("raw_signals", {}).get("service", "unknown")
+        alert_name = result.get("alert_name", "unknown")
+        
+        #update current span with trace-level attributes
         client.update_current_span(
             metadata={
-                "alert_name": result.get("alert_name", "unknown"),
-                "service": result.get("raw_signals", {}).get("service", "unknown"),
+                "alert_name": alert_name,
+                "service": service,
                 "severity": result.get("severity", "unknown"),
                 "diagnosis_mode": result.get("diagnosis_mode", "unknown"),
                 "diagnosed_runbook": diagnosed_runbooks,
                 "resolution_status": resolution_status,
-                "verified": result.get("verified", False)
+                "verified": result.get("verified", False),
+                "escalation_class": escalation_class,
             },
         )
-        print(f"[Langfuse] logged metrics for {trace_id} | status: {resolution_status}")
+        #set trace-level user, session, tags
+        with propagate_attributes(
+            user_id=incident_id,
+            session_id=service,
+            tags=["sre-agent", alert_name, f"severity:{result.get('severity', 'unknown')}", f"escalation_class:{escalation_class}"]
+            ):  
+            
+            #tag the client itself for later updates
+            client.tags = tags = ["sre-agent", alert_name]
+        
+        print(f"[Langfuse] logged metrics for {trace_id} | status: {resolution_status} | class: {escalation_class} | level: {level}")
     
     except Exception as e:
         print(f"[Langfuse] Failed to log incident scores: {e}")
@@ -157,4 +216,5 @@ def log_human_feedback(
         print(f"[langfuse] Logged human feedback on {trace_id}: approved: {approver}")
     except Exception as e:
         print(f"[langfuse] Failed to log human feedback: {e}")
+
 
