@@ -34,6 +34,12 @@ from src.graph.routing import ALERT_CORRELATION_WINDOW, DEFAULT_CORRELATION_WIND
 from src.graph.timeutils import parse_ts
 from src.utils.logger import inc_id
 from src.tools.kg_tool import find_active_upstream_incident
+from src.observability.langfuse_logger import (
+    get_langfuse_handler,
+    get_trace_id,
+    log_incident_run,
+    log_human_feedback,
+)
 
 # in memory incidents store
 _incidents = {}
@@ -189,6 +195,7 @@ def _run_agent(incident_id: str, raw_signals: dict, config: Optional[dict] = Non
             result = {**result, "shadow_execution": True}
         if incident_id in _incidents:
             _incidents[incident_id].update({
+                "trace_id": result.get("trace_id") or _incidents[incident_id].get("trace_id"),
                 "status": result.get('resolution_status'),
                 "severity": result.get('severity'),
                 "root_cause": result.get('root_cause'),
@@ -286,8 +293,24 @@ def _resume_agent(incident_id: str, config: dict):
     try:
         active_gauge.inc()
         print(f"[agent] Resuming graph for incident {incident_id}")
+
+        inc_data = _incidents.get(incident_id, {})
+        raw_signals = inc_data.get("raw_signals") or {}
+        trace_id = inc_data.get("trace_id")
+
+        handler = get_langfuse_handler(
+            session_id=incident_id,
+            alert_name=raw_signals.get("alert_name", "unknown"),
+            scenario_name=raw_signals.get("scenario_name"),
+            trace_id=trace_id,
+        )
+        resume_config = {
+            **config,
+            "callbacks": [handler],
+        }
+
         from src.graph.orchestrator import app as sre_graph
-        result = sre_graph.invoke(None, config=config)
+        result = sre_graph.invoke(None, config=resume_config)
 
         if incident_id in _incidents:
             _incidents[incident_id].update({
@@ -301,6 +324,15 @@ def _resume_agent(incident_id: str, config: dict):
                 "verified_at": result.get('verified_at'),
                 **_attribution_fields(result)
             })
+
+        #log final incident metrics to Langfuse trace
+        current_trace_id = trace_id or get_trace_id(handler)
+        if current_trace_id:
+            log_incident_run(
+                result,
+                trace_id=current_trace_id,
+                scenario_name=raw_signals.get("scenario_name") or "unknown",
+            )
 
         #approve incidents must count toward attribution too
         _record_attribution(
@@ -343,6 +375,7 @@ def _create_record(incident_id: str, raw_signals: dict, source: str) -> dict:
         "agent_mttr_seconds": None,
         "action_executed_at": None,
         "verified_at": None,
+        "trace_id": None,
         "error": None
     }
 
@@ -439,10 +472,8 @@ async def alertmanager_webhook(
         alert_name = labels.get('alertname', 'unknown-alert')
         service = labels.get('service') or infer_service(alert_name)
 
-        # 5-gate logic stability
-        # we only detect the re-fire here. the actual revoke_credit() call is deferred until we
-        # know the id of the incident that caused it
-        
+        #we only detect the re-fire here. the actual revoke_credit() call is deferred until we
+        #know the id of the incident that caused it
         from src.graph.routing import T_STABLE_SECONDS
         from src.tools.kg_tool import query_recent_resolved_incident, revoke_credit,get_dependencies
         import datetime as dt 
@@ -612,6 +643,10 @@ notes: str = ""):
 
         if notes:
             _incidents[incident_id]["approval_notes"] = notes
+
+        trace_id = _incidents[incident_id].get("trace_id")
+        if trace_id:
+            log_human_feedback(trace_id=trace_id, approved=True, notes=notes, approver=approver)
 
         background_tasks.add_task( _resume_agent,incident_id,config)
 
