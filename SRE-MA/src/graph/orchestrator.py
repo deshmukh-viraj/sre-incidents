@@ -13,7 +13,7 @@ from src.agents.execution_agent import human_gate_node, execute_node
 from src.agents.escalation_agent import escalate_node
 from src.agents.deep_investigation import deep_investigation_node
 from src.agents.critic_agent import critic_node
-from src.graph.policy import policy_validator_node, route_after_policy
+from src.graph.policy import policy_validator_node, route_after_policy, route_after_critic
 
 from src.graph.routing import (
     route_after_diagnosis,
@@ -79,7 +79,13 @@ def build_graph() -> StateGraph:
     #communicator runs in parallel with remediator
     #communicator is triggered by detector as well it does not wait for root cause
     graph.add_edge("detector", "communicator")
-    graph.add_edge("critic", "remediator")
+    
+    #retry edge ungrounded/empty -> re-investigate with critique; quality -> remediator; double-reject -> escalate
+    graph.add_conditional_edges("critic", route_after_critic, {
+        "remediator": "remediator",
+        "deep_investigation": "deep_investigation",
+        "escalate": "escalate",
+    })
     graph.add_edge("remediator", "policy_validator")
     graph.add_conditional_edges("policy_validator", route_after_policy, {
         "human_gate": "human_gate",
@@ -151,7 +157,9 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
 
     result = app.invoke(state, config=config)
     client = Langfuse()
-    trace_id = client.get_current_trace_id()
+    trace_id = client.get_current_trace_id() or get_trace_id(handler)
+    if trace_id:
+        result["trace_id"] = trace_id
 
     # attach SRE metadata to the current span
     scenario_name = raw_signals.get("scenario_name")
