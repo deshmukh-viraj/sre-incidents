@@ -29,3 +29,10 @@ class ActionPlanOutput(BaseModel):
     actions: List[ActionOutput]
     root_cause: str
     requires_approval: bool
+
+#retry path, eemediator extracts the propose_remediation call from the scratchpad
+class RemediationProposal(BaseModel):
+    action: str = Field(description="plain english remediation description")
+    tool: str = Field(description="tool name from propose_remediation")
+    target_service: str = Field(description="service to act on")
+    blast_radius: str = Field(description="pod | service | cluster")
