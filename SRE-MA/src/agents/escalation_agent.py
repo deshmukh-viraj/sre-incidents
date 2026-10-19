@@ -61,8 +61,22 @@ def escalate_node(state: AgentState) -> dict:
         )
     
     else:
+        #escalate with the actual finding, proposed action, and policy rejections  never a bare generic line
         reason = "UNKNOWN"
-        message = f"Incident '{incident_id}' required manual investigation"
+        hypotheses = state.get("hypotheses", [])
+        best_guess = (state.get("root_cause") or (hypotheses[0].get("hypothesis") if hypotheses else None)) or "no diagnosis reached"
+        llm_action = state.get("llm_suggested_action")
+        rejections = state.get("policy_rejections") or []
+
+        message = (
+            f" *AI Investigation Inconclusive*\n"
+            f"Incident: '{incident_id}' | Severity: {severity}\n"
+            f"Alert: '{alert_name}'\n"
+            f"Finding: {best_guess}\n"
+            + (f"Proposed Action: {llm_action}\n" if llm_action else "")
+            + (f"Policy Rejections: {'; '.join(str(r.get('reason', r)) for r in rejections)}\n" if rejections else "")
+            + f"Action Required: Manual root cause analysis needed"
+        )
 
     print(f"\n[escalate] {reason}: {incident_id}")
     print(message)
