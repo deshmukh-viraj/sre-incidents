@@ -352,6 +352,14 @@ def route_after_diagnosis(
     diagnosis_mode = state.get("diagnosis_mode")
     loops = state.get("diagnosis_loops", 0)
 
+    # a passing hypothesis routes to remediation regardless of loop count:
+    # failed attempts (e.g. a timed-out deep investigation) must not waste the
+    # budget needed by the successful attempt that followed (INC-SLOBur-6DFF)
+    if hypotheses:
+        max_confidence = max(h.get("confidence", 0) for h in hypotheses)
+        if max_confidence >= DIAGNOSIS_CONFIDENCE:
+            return "remediator"
+
     if loops >= MAX_DIAGNOSIS_LOOPS:
         return "escalate"
 
@@ -360,11 +368,6 @@ def route_after_diagnosis(
         if diagnosis_mode == "llm":
             return "escalate"
         return "llm_diagnoser"
-
-    max_confidence = max(h.get("confidence", 0) for h in hypotheses)
-
-    if max_confidence >= DIAGNOSIS_CONFIDENCE:
-        return "remediator"
 
     # confidence too low
     if diagnosis_mode == "llm":
