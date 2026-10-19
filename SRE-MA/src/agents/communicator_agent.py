@@ -33,7 +33,7 @@ def communicator_node(state: AgentState) -> dict:
     """
     print(f"\n[communicator] Generating communications for {state['incident_id']}")
 
-    llm = _get_llm(temperature=0.1)
+    llm = _get_llm(temperature=0.1, simple=True)  #comms are simple nodes
     severity = state.get("severity", "SEV3")
     alert = state.get("alert_name", "unknown_alert")
     services = ", ".join(state.get("affected_services", ["unknown"]))
@@ -86,6 +86,7 @@ Return this exact JSON structure:
         return {
             "status_page_update": f"We are investigating an issue affecting {services}. Updates to follow.",
             "war_room_summary": f"[{severity}] {alert} — {summary}",
-            "escalation_message": None,
+            #P1-4: never clobber the escalate node's message with None on our own failure
+            "escalation_message": state.get("escalation_message"),
             "errors":  state.get("errors", []) + [f"communicator failed: {str(e)}"],
         }
