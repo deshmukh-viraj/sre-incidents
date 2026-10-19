@@ -21,22 +21,43 @@ from src.graph.routing import (
     DB_POOL_WARNING, CIRCUIT_BREAKER_OPEN, DECLINE_RATE_HIGH,
     classify_blast_radius,
 )
-from src.agents.utils import calculate_cost
 
-MAX_ROUNDS, MAX_TOKEN = 4, 20_000
+#iteration budget: configurable per alert class
+MAX_ROUNDS_RUNBOOK_HIT = 4   #known runbook match
+MAX_ROUNDS_RUNBOOK_MISS = 8  #novel / no runbook match
+MAX_TOKEN = 20_000
 STAGNATION_THRESHOLD = 2
+
+
+def get_max_rounds(state) -> int:
+    """determine max rounds based on whether a runbook matches."""
+    runbook_id = state.get("runbook_id")
+    if runbook_id and runbook_id.startswith("RB-"):
+        return MAX_ROUNDS_RUNBOOK_HIT
+    return MAX_ROUNDS_RUNBOOK_MISS
+
 
 INVESTIGATOR_PROMPT = (
     "YOU ARE AN EXPERT SRE INVESTIGATING AN INCIDENT WITH NO KNOWN RUNBOOK MATCH "
     "EACH TOOL CALL MUST TEST ONE HYPOTHESIS; NEVER INVENT METRICS VALUES "
     "RULE 1: start with query_topology(primary service) for dependencies, past incidents "
-    "and exact PromQL. Then call list_metrics(service) before any prometheus query — "
-    "use the exact queries it returns, never guess metric names or labels. "
-    f"Within {MAX_ROUNDS} tool rounds call propose_remediation with the safest fix "
-    "(blast_radius pod|service|cluster), or state 'escalate' if evidence is weak. "
-    "TERMINATION IS MANDATORY: you MUST end by EITHER calling propose_remediation "
+    "and exact PromQL. The PromQL returned by query_topology is authoritative — use it directly. "
+    "Only call list_metrics(service) as a FALLBACK if a query returns empty or errors. "
+    "You have a budget of {max_rounds} tool rounds. Prioritize the most diagnostic query first: "
+    "for alerts mentioning DB pool pressure, query the pool metrics first; "
+    "for circuit breaker alerts, query the breaker state and upstream latency first. "
+    "Remaining budget will be reported each round. "
+    "TERMINATION: you MUST end by EITHER calling propose_remediation "
     "OR your final message being exactly 'escalate'. Never end with only a summary. "
-    "IF YOU SEE A MESSAGE SAYING YOU ALREADY QUERIED SOMETHING, MOVE TO A DIFFERENT HYPOTHESIS IMMEDIATELY"
+    "IF YOU SEE A MESSAGE SAYING YOU ALREADY QUERIED SOMETHING, MOVE TO A DIFFERENT HYPOTHESIS IMMEDIATELY\n"
+    "PARALLEL EXECUTION: When multiple independent queries can be made in the same round, "
+    "batch them into a single tool call batch. For example, p99 latency, error rate, "
+    "and DB pool queries are independent and should be issued together.\n"
+    "PROMQL VALIDATION: Before executing any query_prometheus_metric, ensure the PromQL has "
+    "balanced brackets and that rate()/increase() functions include a range selector (e.g., [5m]). "
+    "Malformed queries will be rejected with a structured error.\n"
+    "LOG HANDLING: If logs_ok is false, state that logs are unavailable rather than calling query_service_logs. "
+    "If logs_ok is true and the alert is novel, query_service_logs is a recommended first-round call."
 )
 
 # breach checks reused by the calm-first policy below
@@ -73,10 +94,14 @@ def get_harness(use_readonly: bool = True):
     """
     global _harness
     if _harness is None:
+        llm = _get_llm(temperature=0.2)
+        llm = llm.bind_tools(
+            READ_TOOLS if use_readonly else ALL_TOOLS,
+            parallel_tool_calls=True,
+        )
         _harness = create_react_agent(
-            model=_get_llm(temperature=0.1),
+            model=llm,
             tools=READ_TOOLS if use_readonly else ALL_TOOLS,
-            prompt=INVESTIGATOR_PROMPT
         )
     return _harness
 
@@ -130,16 +155,33 @@ def deep_investigation_node(state) -> dict:
     seeds = "\n".join(SERVICE_METRICS.get(primary_service, [])[:6])
     seed_text = f"\nSEED METRICS (run these first):\n{seeds}" if seeds else ""
 
+    #determine round budget and inject into prompt
+    max_rounds = get_max_rounds(state)
+    logs_ok = raw.get("logs_ok", False)
+    
+    #format the prompt with runtime values
+    formatted_prompt = INVESTIGATOR_PROMPT.format(
+        max_rounds=max_rounds,
+        logs_ok=logs_ok
+    )
+
+    #on a critic retry, the critique tells the investigator what was wrong with the last proposal
+    critique_hint = ""
+    if state.get("requires_retry") and state.get("critique"):
+        critique_hint = f"\nCRITIC REJECTION (fix this): {state['critique']}\n"
+
     ctx = (
         f"ALERT: {state.get('alert_name')} | SEVERITY: {state.get('severity')}\n"
         f"SERVICES: {', '.join(all_services)} (primary: {primary_service})\n"
-        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{hypothesis_hint}{seed_text}\nInvestigate now"
+        f"ROUNDS REMAINING: {max_rounds}\n"
+        f"LOGS AVAILABLE: {logs_ok}\n"
+        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
     )
 
     try:
         result = get_harness().invoke(
-            {"messages": [HumanMessage(content=ctx)]},
-            config={"recursion_limit": 2 * MAX_ROUNDS + 2}
+            {"messages": [SystemMessage(content=formatted_prompt), HumanMessage(content=ctx)]},
+            config={"recursion_limit": 2 * max_rounds + 2}
         )
     except Exception as e:
         print(f"[deep_investigation] ERROR: {e}")
@@ -151,14 +193,24 @@ def deep_investigation_node(state) -> dict:
 
     msgs = result["messages"]
 
-    #heck terminal call -> forced finalization -> deterministic fallback synthesizer
+    #forced finalization, one retry with an explicit "output now" nudge before giving up
     terminal = next((tc for m in msgs for tc in (getattr(m, "tool_calls", None) or []) if tc['name'] in ("propose_remediation", "escalate_with_reason")), None)
     if terminal is None:
         try:
             fin_llm = _get_llm(temperature=0.0).bind_tools([propose_remediation, escalate_with_reason], tool_choice="required")
-            fin_msg = fin_llm.invoke(msgs + [HumanMessage(content="Investigation limit reached. You MUST call propose_remediation or escalate_with_reason now.")])
-            msgs.append(fin_msg)
-            terminal = next((tc for tc in (getattr(fin_msg, "tool_calls", None) or []) if tc['name'] in ("propose_remediation", "escalate_with_reason")), None)
+            #use full system prompt with round budget for forced finalization
+            fin_ctx = (
+                f"ROUNDS REMAINING: 0 (limit reached)\n"
+                f"Investigation limit reached. You MUST call propose_remediation or escalate_with_reason now.\n"
+                f"{ctx}"
+            )
+            assert msgs and msgs[0].type == "system", "First message must be labeled system"
+            for attempt, nudge in enumerate([fin_ctx, "Output your proposal now."]):
+                fin_msg = fin_llm.invoke(msgs + [HumanMessage(content=nudge)])
+                msgs.append(fin_msg)
+                terminal = next((tc for tc in (getattr(fin_msg, "tool_calls", None) or []) if tc['name'] in ("propose_remediation", "escalate_with_reason")), None)
+                if terminal:
+                    break
         except Exception as e:
             print(f"[deep_investigation] Forced finalization failed: {e}")
 
@@ -173,7 +225,10 @@ def deep_investigation_node(state) -> dict:
             blast = classify_blast_radius({"tool": tool, "params": {"service": primary_service}})
             terminal = {"name": "propose_remediation", "args": {"action": best_fix, "tool": tool, "target_service": primary_service, "blast_radius": blast, "confidence": 0.70 if rate >= 0.90 else 0.55}}
         else:
-            terminal = {"name": "escalate_with_reason", "args": {"reason": "no_relevant_known_fix"}}
+            #never escalate empty-handed,carry the best diagnosis into the reason
+            hyps = state.get("hypotheses") or []
+            finding = (state.get("root_cause") or (hyps[0].get("hypothesis") if hyps else "") or "no diagnosis reached")
+            terminal = {"name": "escalate_with_reason", "args": {"reason": f"no_relevant_known_fix; finding: {finding}"}}
 
     proposal = terminal["args"] if terminal and terminal["name"] == "propose_remediation" else None
     text_escalated = terminal is not None and terminal["name"] == "escalate_with_reason"
@@ -276,7 +331,7 @@ def deep_investigation_node(state) -> dict:
                 }],
             }
 
-    print(f"[deep_investigation] Completed. Proposal: {proposal.get('action') if proposal else ('escalate' if text_escalated else 'None')} | In: {input_tokens} Out: {output_tokens} Cost: ${cost:.6f}")
+    print(f"[deep_investigation] Completed. Proposal: {proposal.get('action') if proposal else ('escalate' if text_escalated else 'None')}")
 
     return {**base_return,
         "investigation_complete": proposal is not None or text_escalated or stagnant,
