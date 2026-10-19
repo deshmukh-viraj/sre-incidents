@@ -7,6 +7,7 @@ remediator agent: builds and validates an action plan from the diagnosed root ca
 from typing import Optional
 import json
 import os
+import re
 from src.graph.state import AgentState
 from src.graph.routing import classify_blast_radius, requires_human_approval, DIAGNOSIS_CONFIDENCE
 
@@ -16,6 +17,19 @@ from src.graph.routing import classify_blast_radius, requires_human_approval, DI
 def remediator_node(state: AgentState) -> dict:
     if state.get("action_plan"):
         return {}
+
+    # critic retry: rebuild the plan from the proposal the harness actually made
+    if state.get("requires_retry"):
+        plan = _extract_from_scratchpad(state)
+        if plan is None:
+            plan = _llm_extract_proposal(state)
+        if plan:
+            print(f"\n[remediator] Retry: rebuilt plan from investigation proposal ({plan[0]['tool']})")
+            return {
+                "action_plan": plan,
+                "requires_approval": any(a.get("requires_approval") for a in plan),
+                "requires_retry": False,
+            }
         
     print(f"\n[remediator] Building action plan for {state['incident_id']}")
 
@@ -205,3 +219,70 @@ def _check_correlated_rb_consensus(state: AgentState) -> Optional[str]:
     if len(rb_seen) == 1:
         return rb_seen.pop()
     return None
+
+
+#task 3.4: extraction helpers for the critic retry path
+
+def _extract_from_scratchpad(state: AgentState) -> Optional[list]:
+    """find the last propose_remediation call in the scratchpad and copy its args into an action plan."""
+    entries = [str(e) for e in state.get("investigation_scratchpad", []) if "propose_remediation" in str(e)]
+    if not entries:
+        return None
+    blob = entries[-1]
+    args = dict(re.findall(r"(\w+)\s*=\s*['\"]([^'\"]+)['\"]", blob))
+    tool = args.get("tool")
+    if not tool:
+        return None
+    service = args.get("target_service") or (state.get("affected_services") or ["unknown"])[0]
+    action = {
+        "action": args.get("action", tool),
+        "tool": tool,
+        "params": {"service": service},
+        "blast_radius": args.get("blast_radius") or classify_blast_radius({"tool": tool, "params": {"service": service}}),
+        "reversible": True,
+        "requires_approval": False,
+        "executed": False,
+        "result": None,
+    }
+    action["requires_approval"] = requires_human_approval(action)
+    return [action]
+
+
+def _llm_extract_proposal(state: AgentState) -> Optional[list]:
+    """no proposal in scratchpad -> one LLM call with scratchpad + critique to synthesize it."""
+    try:
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from src.agents.utils import _get_llm
+        from src.agents.schemas import RemediationProposal
+    except ImportError:
+        return None
+
+    scratchpad = "\n".join(str(e) for e in state.get("investigation_scratchpad", [])[-20:])
+    critique = state.get("critique") or "no critique"
+    try:
+        llm = _get_llm(temperature=0.0, simple=True).with_structured_output(RemediationProposal)  # P1-5: extraction is a simple node
+        # every LLM call must start with a system message (prompt-channel fix from trace INC-SLOBur-0F86)
+        resp = llm.invoke([
+            SystemMessage(content="Extract the remediation proposal from the investigation scratchpad. Return the tool call the investigator intended."),
+            HumanMessage(content=f"CRITIC: {critique}\n\nSCRATCHPAD:\n{scratchpad}"),
+        ])
+    except Exception as e:
+        print(f"[remediator] LLM proposal extraction failed: {e}")
+        return None
+
+    tool = getattr(resp, "tool", None)
+    if not tool:
+        return None
+    service = getattr(resp, "target_service", None) or (state.get("affected_services") or ["unknown"])[0]
+    action = {
+        "action": getattr(resp, "action", None) or tool,
+        "tool": tool,
+        "params": {"service": service},
+        "blast_radius": getattr(resp, "blast_radius", None) or classify_blast_radius({"tool": tool, "params": {"service": service}}),
+        "reversible": True,
+        "requires_approval": False,
+        "executed": False,
+        "result": None,
+    }
+    action["requires_approval"] = requires_human_approval(action)
+    return [action]
