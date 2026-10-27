@@ -102,7 +102,7 @@ def evaluate_gate3(
         passed=True,
         label_hint=AGENT_REMEDIATED,
         lead_seconds=lead,
-        reason=f"Recovered {lead:.1f}s after agent acted. Looks like agent fixed it"
+        reason=f"Metric recovered {lead:.1f}s after agent action (within {tolerance_sec:.0f}s tolerance)",
     )
 
 
