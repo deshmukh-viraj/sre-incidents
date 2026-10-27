@@ -7,7 +7,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from src.graph.state import AgentState
 from src.agents.detector_agent import detector_node
 from src.agents.diagnoser_agent import diagnoser_node, llm_diagnoser
-from src.agents.remediator_agent import remediator_node
+from src.agents.remediator_agent import remediator_node, repair_proposal_node
 from src.agents.communicator_agent import communicator_node
 from src.agents.execution_agent import human_gate_node, execute_node
 from src.agents.escalation_agent import escalate_node
@@ -45,6 +45,7 @@ def build_graph() -> StateGraph:
     graph.add_node("llm_diagnoser", llm_diagnoser)
     graph.add_node("deep_investigation", deep_investigation_node)
     graph.add_node("critic", critic_node)
+    graph.add_node("repair_proposal", repair_proposal_node)
     graph.add_node("policy_validator", policy_validator_node)
     graph.add_node("remediator", remediator_node)
     graph.add_node("communicator", communicator_node)
@@ -80,12 +81,15 @@ def build_graph() -> StateGraph:
     #communicator is triggered by detector as well it does not wait for root cause
     graph.add_edge("detector", "communicator")
     
-    #retry edge ungrounded/empty -> re-investigate with critique; quality -> remediator; double-reject -> escalate
+    #critic rejection ladder: one-call repair -> critic; then deterministic plan
+    #(high confidence) or full re-investigation; hard ceiling -> escalate
     graph.add_conditional_edges("critic", route_after_critic, {
+        "repair_proposal": "repair_proposal",
         "remediator": "remediator",
         "deep_investigation": "deep_investigation",
         "escalate": "escalate",
     })
+    graph.add_edge("repair_proposal", "critic")
     graph.add_edge("remediator", "policy_validator")
     graph.add_conditional_edges("policy_validator", route_after_policy, {
         "human_gate": "human_gate",
@@ -174,7 +178,9 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
         }
     )
 
-    log_incident_run(result, trace_id=trace_id, scenario_name=scenario_name or "unknown")
+    status = str(result.get("resolution_status", "")).lower()
+    if status in ("resolved", "escalated", "failed", "executed_unverified"):
+        log_incident_run(result, trace_id=trace_id, scenario_name=scenario_name or "unknown")
 
     trace_url = client.get_trace_url()
     print(f"[Lanfusr] View trace in brower:{trace_url}")
