@@ -34,7 +34,9 @@ MAX_DIAGNOSIS_LOOPS = 3       # prevent infinite re-diagnosis
 #time for poll + prometheus query 
 VERIFICATION_OVERHEAD_SECONDS = 25
 DELTA_EFFECT_SECONDS = {
-    "set_feature_flag": 60,
+    # ponytail: 15s matches real propagation time for in-memory/config flag flips.
+    # Ceiling: assumes flag propagation ≤15s. Upgrade: measure per-service flag propagation p99.
+    "set_feature_flag": 15,
     "rollback_deployment": 120,
     "rolling_restart": 90,
     "capture_diagnostics": 15,
@@ -72,8 +74,14 @@ def _anomalous_sig(state: AgentState):
     s = state.get("raw_signals", {}); lp = s.get("log_patterns", {})
     out = {}
     if (s.get("p99_latency_s") or 0) >= P99_LATENCY_WARNING: out["p99"] = 1
-    if (s.get("error_rate") or 0) >= ERROR_RATE_WARNING: out["error"] = 1
-    if (s.get("throttle_error_rate") or 0) >= THROTTLE_RATE_HIGH: out["throttle_rate"] = 1
+    er = s.get("error_rate") or 0
+    tr = s.get("throttle_error_rate") or 0
+    if er >= ERROR_RATE_WARNING:
+        out["error"] = 1
+        #if error_rate is high but throttle_error_rate is low, card rails cannot explain the errors
+        if tr < er * 0.5:
+            out["non_throttle_errors"] = 1
+    if tr >= THROTTLE_RATE_HIGH: out["throttle_rate"] = 1
     if (s.get("db_pool_utilization") or 0) >= NOVEL_DB_PRESSURE: out["db_pool"] = 1
     if (s.get("circuit_breaker_state") or 0) > CIRCUIT_BREAKER_OPEN: out["circuit_breaker"] = 1
     if (s.get("payment_decline_rate") or 0) >= DECLINE_RATE_HIGH: out["decline_rate"] = 1
@@ -118,10 +126,21 @@ def _apply_residual_check(result: dict, state: AgentState) -> dict:
 # severity classification (after detector collects signals)
 def classify_severity(state: AgentState) -> str:
     """
-    python classifies severity from raw metric values.
-    returns severity enum value as string.
+    severity from the alert annotation label first (it is the paging contract),
+    falling back to raw metric values when no label is present.
+    metrics-only classification produced a SEV1 on a warning-labelled burn alert
+    because the detector enriches a live p99 sample that the alert never fired on
     """
     signals = state.get("raw_signals", {})
+
+    alert_label = (signals.get("severity") or "").strip().lower()
+    label_severity = {
+        "critical": Severity.SEV1.value,
+        "warning": Severity.SEV2.value,
+        "info": Severity.SEV3.value,
+    }.get(alert_label)
+    if label_severity:
+        return label_severity
 
     p99 = signals.get("p99_latency_s")
     error_rate= signals.get("error_rate")
@@ -177,18 +196,40 @@ def deterministic_diagnosis(state: AgentState) -> dict:
 
     #RB-001: payment latency spike
     if runbook_id == "RB-001" and p99 is not None and p99 >= P99_LATENCY_WARNING:
-        return _apply_residual_check({
-            "hypothesis": "Card rails throttling causing payment latency spike",
-            "evidence":[
-                f"p99={p99:.3f}s (threshold={P99_LATENCY_WARNING}s)",
-                f"error_rate={error_rate:.3f}" if error_rate else "",
-                f"throttle_rate={throttle_rate:.3f}" if throttle_rate else "",
-            ],
-            "confidence":0.88,
-            "alternative": "DB pool pressure or bad deployment causing latency",
-            "supporting_runbook": "RB-001",
-            "diagnosis_mode":"deterministic",
-        }, state)
+        #verify positive evidence of card rails throttling (timeout, 429s, or dominant throttle rate).
+        #simple ratio check. dynamic anomaly detector over carrier response codes.
+        has_throttling_signals = bool(
+            log_patterns.get("card_rails_timeout")
+            or log_patterns.get("http_429_count", 0) > 0
+            or (throttle_rate is not None and throttle_rate >= THROTTLE_RATE_HIGH and (not error_rate or throttle_rate / error_rate >= 0.5))
+        )
+        if has_throttling_signals:
+            return _apply_residual_check({
+                "hypothesis": "Card rails throttling causing payment latency spike",
+                "evidence": [
+                    f"p99={p99:.3f}s above internal warning threshold={P99_LATENCY_WARNING}s (alert annotation may cite its own)",
+                    f"error_rate={error_rate:.3f}" if error_rate else "",
+                    f"throttle_rate={throttle_rate:.3f}" if throttle_rate else "",
+                ],
+                "confidence": 0.88,
+                "alternative": "DB pool pressure or bad deployment causing latency",
+                "supporting_runbook": "RB-001",
+                "diagnosis_mode": "deterministic",
+            }, state)
+        else:
+            return _apply_residual_check({
+                "hypothesis": "Payment latency spike — cause ambiguous, card rails throttling unconfirmed",
+                "evidence": [
+                    f"p99={p99:.3f}s elevated",
+                    f"error_rate={error_rate:.3f}" if error_rate else "",
+                    f"throttle_rate={throttle_rate:.3f} explains only minority of errors" if (throttle_rate and error_rate) else "",
+                    "no 429 errors or card_rails timeouts in logs" if not log_patterns.get("card_rails_timeout") else "",
+                ],
+                "confidence": 0.50,
+                "alternative": "Bad deployment or downstream dependency issue",
+                "supporting_runbook": "RB-001",
+                "diagnosis_mode": "deterministic",
+            }, state)
 
     #RB-002: circuit breaker trip
     if runbook_id == "RB-002" and cb_state is not None and cb_state > CIRCUIT_BREAKER_OPEN:
