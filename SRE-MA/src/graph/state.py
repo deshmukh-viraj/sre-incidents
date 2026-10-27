@@ -158,9 +158,11 @@ class AgentState(TypedDict, total=False):
     plan_viable: bool
     requires_retry: bool        # critic sets True when it rejects the proposal
     critic_reject_count: int    # counts critic rejections to bound retries
-    
+    escalate_reason: Optional[str]   # agent_escalated | critic_rejected_after_retry | None
+    repair_attempts: Optional[int]   # one-call repair hops used before a full re-investigation
+    early_paged: bool                # SEV1 paged humans mid-ladder; escalate dedupes
 
-    
+
 
 def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
     """
@@ -256,5 +258,9 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         executed_action_keys=[],
         requires_retry=False,
         critic_reject_count=0,
-        plan_viable=True
+        plan_viable=True,
+        escalation_reason=[],
+        escalate_reason=None,
+        repair_attempts=0,
+        early_paged=False
     )
