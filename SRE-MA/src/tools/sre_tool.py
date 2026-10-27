@@ -17,6 +17,14 @@ from src.tools.loki_tool import (
 
 load_dotenv()
 
+try:
+    from langfuse import observe
+except ImportError:
+    def observe(*args, **kwargs):
+        def decorator(f):
+            return f
+        return decorator
+
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 JIRA_URL = os.getenv("JIRA_URL")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
@@ -86,6 +94,7 @@ def lookup_runbook(query: str, runbook_id: Optional[str] = None, k: int = 3) -> 
         }
 
 
+@observe(name="execute_remediation")
 def execute_remediation(action: str, tool: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
     run the fix.
