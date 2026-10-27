@@ -102,15 +102,22 @@ def log_incident_run(
     diagnosed_runbooks = best_hyp.get("supporting_runbook") or result.get("root_cause") or "none"
     resolution_status = result.get("resolution_status", "UNKNOWN")
 
+    #dont log final incident resolution metrics if the incident is still opem
+    if str(resolution_status).lower() in ("investigating", "waiting_for_approval", "open"):
+        return
+
     #determine if it was success (only RESOLVED counts, ESCALATED/FAILED do not count)
     is_resolved = 1.0 if resolution_status and resolution_status.upper() == "RESOLVED" else 0.0
 
     #escalation with evidence tracking  
-    has_evidence = (
+    has_evidence = bool(
         result.get("root_cause") is not None or
         result.get("investigation_steps", 0) > 0 or
         result.get("evidence_summary") is not None or
-        len(result.get("hypotheses", [])) > 0
+        result.get("llm_suggested_action") is not None or
+        result.get("diagnosis_summary") is not None or
+        len(result.get("hypotheses", [])) > 0 or
+        len(result.get("action_plan", [])) > 0
     )
 
     #determine escalation level
@@ -131,29 +138,34 @@ def log_incident_run(
     else:
         level = "INFO"
 
+    def _score(name: str, value: Any, data_type: str = "NUMERIC"):
+        try:
+            client.create_score(trace_id=trace_id, name=name, value=value, data_type=data_type)
+        except Exception:
+            client.score_current_trace(name=name, value=value, data_type=data_type)
+
     try:
-        #log sre metrics using  score_current_trace
-        client.score_current_trace(name="mttr_seconds", value=float(result.get("mttr_seconds") or 0), data_type="NUMERIC")
-        client.score_current_trace(name="token_cost_usd", value=float(result.get("token_cost_usd") or 0), data_type="NUMERIC")
-        client.score_current_trace(name="max_confidence", value=float(confidence or 0), data_type="NUMERIC")
-        client.score_current_trace(name="diagnosis_loops", value=float(result.get("diagnosis_loops") or 0), data_type="NUMERIC")
-        client.score_current_trace(name="resolution_status", value=is_resolved, data_type="NUMERIC")
+        # mttr only exists for genuinely resolved incidents; check business/agent MTTR keys
+        mttr = result.get("business_mttr_seconds") or result.get("agent_mttr_seconds") or result.get("mttr_seconds")
+        if resolution_status.upper() == "RESOLVED" and mttr is not None:
+            _score("mttr_seconds", float(mttr), "NUMERIC")
+        cost_usd = float(result.get("token_cost_usd") or 0)
+        _score("token_cost_usd", cost_usd, "NUMERIC")
+        _score("cost", cost_usd, "NUMERIC")
+        _score("max_confidence", float(confidence or 0), "NUMERIC")
+        _score("diagnosis_loops", float(result.get("diagnosis_loops") or 0), "NUMERIC")
+        _score("resolution_status", is_resolved, "NUMERIC")
 
-        #log escalation class
-        if escalation_class != "resolved":
-            client.score_current_trace(
-                name="escalation_class",
-                value=escalation_class,
-                data_type="CATEGORICAL",
-
-            )
+        #log escalation class for all runs so resolved updates stale in-flight scores
+        _score("escalation_class", escalation_class, "CATEGORICAL")
             
-        #log ground truth comparison
+        #log ground truth comparison — only when the scenario has a known oracle;
+        # novel scenarios (no expected runbook) must not score a fake 0
         if scenario_name:
-            expected_runbook = SCENARIO_EXPECTED_RUNBOOK.get(scenario_name, "unknown")
+            expected_runbook = SCENARIO_EXPECTED_RUNBOOK.get(scenario_name)
             if expected_runbook and diagnosed_runbooks:
                 is_correct = 1.0 if expected_runbook in diagnosed_runbooks else 0.0
-                client.score_current_trace(name="ground_truth_match", value=is_correct, data_type="NUMERIC")
+                _score("ground_truth_match", is_correct, "NUMERIC")
 
         #set trace-level fields: userid, sessionid at trace level, tags preserved
         incident_id = result.get("incident_id", "unknown")
@@ -171,6 +183,8 @@ def log_incident_run(
                 "resolution_status": resolution_status,
                 "verified": result.get("verified", False),
                 "escalation_class": escalation_class,
+                "token_cost_usd": cost_usd,
+                "total_tokens_used": result.get("total_tokens_used", 0),
             },
         )
         #set trace-level user, session, tags
@@ -205,13 +219,15 @@ def log_human_feedback(
     
     client = _get_client()
     try:
-        client.score(
-            trace_id=trace_id, 
+        
+        client.create_score(
+            trace_id=trace_id,
             name="human_approval",
             value=1.0 if approved else 0.0,
             comment=notes or f"Action {'approved' if approved else 'rejected'} by {approver}",
             data_type="BOOLEAN",
-            user_id = approver
+            metadata={"approver": approver}
+            
         )
         print(f"[langfuse] Logged human feedback on {trace_id}: approved: {approver}")
     except Exception as e:
