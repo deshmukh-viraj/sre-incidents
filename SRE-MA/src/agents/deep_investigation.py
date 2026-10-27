@@ -25,7 +25,6 @@ from src.graph.routing import (
 #iteration budget: configurable per alert class
 MAX_ROUNDS_RUNBOOK_HIT = 4   #known runbook match
 MAX_ROUNDS_RUNBOOK_MISS = 8  #novel / no runbook match
-MAX_TOKEN = 20_000
 STAGNATION_THRESHOLD = 2
 
 
@@ -56,6 +55,9 @@ INVESTIGATOR_PROMPT = (
     "PROMQL VALIDATION: Before executing any query_prometheus_metric, ensure the PromQL has "
     "balanced brackets and that rate()/increase() functions include a range selector (e.g., [5m]). "
     "Malformed queries will be rejected with a structured error.\n"
+    "NO DATA IS NOT PROOF OF ABSENCE: an empty or erroring query means that signal is "
+    "unavailable, not that the fault is absent. Record which query returned nothing; "
+    "never base an escalation purely on missing data — escalate on the evidence you have.\n"
     "LOG HANDLING: If logs_ok is false, state that logs are unavailable rather than calling query_service_logs. "
     "If logs_ok is true and the alert is novel, query_service_logs is a recommended first-round call."
 )
@@ -77,7 +79,9 @@ def _breaches(state) -> list:
     for key, thr in _BREACH_CHECKS:
         v = s.get(key)
         if v is not None and v >= thr:
-            out.append(f"{key}={v:.3f} exceeds threshold {thr}")
+            # name the source of the threshold: the alert's own annotation may cite a
+            # different value (INC-SLOBur-633F: alert fired at 1.0s, ours says 1.5s)
+            out.append(f"{key}={v:.3f} above internal warning threshold {thr}")
     lp = s.get("log_patterns", {}) or {}
     if (lp.get("auth_failures") or 0) >= 50:
         out.append(f"auth_failures={lp.get('auth_failures')} (>=50)")
@@ -87,21 +91,19 @@ def _breaches(state) -> list:
 
 _harness = None
 
-def get_harness(use_readonly: bool = True):
-    """create the react agent harness
-    use_readonly: if true, only use read only tools (safe for investigation)
-                  if false, use all tools
+def get_harness():
+    """create the react agent harness.
+    binds read tools AND the two terminal tools: the model cannot conclude with
+    propose_remediation/escalate_with_reason unless they are bound (the unbound
+    harness made conclusions reachable only through the forced-finalizer).
     """
     global _harness
     if _harness is None:
         llm = _get_llm(temperature=0.2)
-        llm = llm.bind_tools(
-            READ_TOOLS if use_readonly else ALL_TOOLS,
-            parallel_tool_calls=True,
-        )
+        llm = llm.bind_tools(ALL_TOOLS, parallel_tool_calls=True)
         _harness = create_react_agent(
             model=llm,
-            tools=READ_TOOLS if use_readonly else ALL_TOOLS,
+            tools=ALL_TOOLS,
         )
     return _harness
 
@@ -109,6 +111,71 @@ def get_harness(use_readonly: bool = True):
 def _cache_key(tool_name: str, args: dict) -> str:
     """generate a cache key for tool calls"""
     return f"{tool_name}: {hash(frozenset(args.items()))}"
+
+
+def _tool_evidence(msgs, cap: int = 6) -> list:
+    """pair tool results with the query that produced them, most recent last."""
+    queries, out = {}, []
+    for m in msgs:
+        for tc in (getattr(m, "tool_calls", None) or []):
+            a = tc.get("args") or {}
+            queries[tc.get("id")] = (tc.get("name") or "", str(a.get("expr") or a.get("query") or ""))
+        if getattr(m, "type", "") == "tool" and getattr(m, "tool_call_id", None) in queries:
+            _, expr = queries[m.tool_call_id]
+            # cite the metric + labels, not the wrapping function: 'sum -> 0.012'
+            # told the critic nothing; metric{labels} is what it must verify
+            ref = re.search(r"[a-zA-Z_][a-zA-Z0-9_]*(?=\{)", expr)
+            if ref:
+                end = expr.find("}", ref.end())
+                short = expr[ref.start(): end + 1][:80] if end != -1 else expr[ref.start():][:80]
+            else:
+                short = expr.split("(", 1)[0][:60] or "tool"
+            out.append(f"{short} -> {str(m.content)[:60]}")
+    return out[-cap:]
+
+
+def _structured_writeback(state, base_return, proposal, terminal, text_escalated, msgs) -> dict:
+    """the agent concluded by calling escalate_with_reason with a
+    fully-evidenced finding, but only the free text survived; hypotheses/root_cause/
+    evidence_summary stayed null so the critic saw hypotheses:[] and the escalator
+    reported 'Finding: no diagnosis reached'. Write the finding, the live tool
+    observations and the signal bullets into state on every terminal path.
+    """
+    finding, conf, agent_escalated = None, 0.0, False
+    if proposal:
+        finding, conf = str(proposal.get("action") or ""), 0.65
+        #0.65 < DIAGNOSIS_CONFIDENCE: proposals still pass critic + policy, findings
+        #alone must not auto remediate
+    elif text_escalated:
+        finding = str((terminal["args"] or {}).get("reason", "") or "")
+        conf, agent_escalated = 0.60, True
+
+    if not finding:
+        return base_return
+
+    s = state.get("raw_signals", {})
+    breaches = _breaches(state) or [
+        f"{key}={s.get(key)} within internal threshold {thr}"
+        for key, thr in _BREACH_CHECKS if s.get(key) is not None
+    ][:4]
+    # finding lives in root_cause/diagnosis_summary/hypothesis already;
+    # evidence_summary carries only observations (P1 dedupe)
+    ev_core = breaches + _tool_evidence(msgs)
+    evidence = ev_core + [finding]
+
+    return {**base_return,
+        "hypotheses": [{"hypothesis": finding, "evidence": evidence,
+                        "confidence": conf, "supporting_runbook": None}],
+        "root_cause": finding,
+        "diagnosis_summary": finding,
+        "evidence_summary": "\n".join(ev_core),
+        "llm_suggested_action": proposal.get("action") if proposal else None,
+        "proposed_tool": proposal.get("tool") if proposal else None,
+        "proposed_target": proposal.get("target_service") if proposal else None,
+        "proposed_blast_radius": proposal.get("blast_radius") if proposal else None,
+        "escalate_reason": "agent_escalated" if agent_escalated else None,
+        "investigation_complete": True,
+    }
 
 
 def deep_investigation_node(state) -> dict:
@@ -221,7 +288,7 @@ def deep_investigation_node(state) -> dict:
         relevant = [(fix, int(rate)/100.0) for fix, rate in fixes if any(k in fix.lower() for k in keywords)]
         if relevant:
             best_fix, rate = max(relevant, key=lambda x: x[1])
-            tool = "rollback_deployment" if "rollback" in best_fix.lower() else ("set_feature_flag" if "flag" in best_fix.lower() else "restart_service")
+            tool = "rollback_deployment" if "rollback" in best_fix.lower() else ("set_feature_flag" if "flag" in best_fix.lower() else "rolling_restart")
             blast = classify_blast_radius({"tool": tool, "params": {"service": primary_service}})
             terminal = {"name": "propose_remediation", "args": {"action": best_fix, "tool": tool, "target_service": primary_service, "blast_radius": blast, "confidence": 0.70 if rate >= 0.90 else 0.55}}
         else:
@@ -261,12 +328,11 @@ def deep_investigation_node(state) -> dict:
         ],
         "investigation_steps": sum(1 for m in msgs if m.type == "ai"),
         "diagnosis_mode": "deep_agents",
-        "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
-        "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
         "total_tokens_used": state.get("total_tokens_used", 0) + input_tokens + output_tokens,
         "token_cost_usd": state.get("token_cost_usd", 0.0) + cost,
         "model_used": model_name or state.get("model_used") or "deep-agent-harness",
     }
+
 
     # calm-first policy: novel incidents must not page humans by default.
     # - no live breach at all -> close as false positive (notify info, no human)
@@ -333,10 +399,11 @@ def deep_investigation_node(state) -> dict:
 
     print(f"[deep_investigation] Completed. Proposal: {proposal.get('action') if proposal else ('escalate' if text_escalated else 'None')}")
 
-    return {**base_return,
-        "investigation_complete": proposal is not None or text_escalated or stagnant,
-        "llm_suggested_action": proposal and proposal.get("action"),
-        "proposed_tool": proposal and proposal.get("tool"),
-        "proposed_target": proposal and proposal.get("target_service"),
-        "proposed_blast_radius": proposal and proposal.get("blast_radius"),
-    }
+    out = _structured_writeback(state, base_return, proposal, terminal, text_escalated, msgs)
+    if "investigation_complete" not in out:
+        out = {**out, "investigation_complete": proposal is not None or text_escalated or stagnant}
+    if "hypotheses" in out:
+        print(f"[deep_investigation] Writeback: finding={str(out.get('root_cause'))[:80]!r} "
+              f"evidence={len(out['hypotheses'][0]['evidence'])} entries, agent_escalated={out.get('escalate_reason')}")
+    return out
+
