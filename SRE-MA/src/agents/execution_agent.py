@@ -29,6 +29,13 @@ from src.graph.clear_time import build_clear_evidence
 from src.graph.attribution_gates import evaluate_gate3, final_label
 from typing import Optional, Dict, Any, List
 
+try:
+    from langfuse import observe
+except ImportError:
+    def observe(*args, **kwargs):
+        def decorator(f):
+            return f
+        return decorator
 
 
 @dataclass
@@ -37,7 +44,8 @@ class VerificationResult:
     p99_latency_s: Optional[float] = None
     error_rate: Optional[float] = None
     t_clear: Optional[str] = None
-    signal: Optional[str] = None 
+    signal: Optional[str] = None
+    healthy_run_len: int = 0 
 
 # node 6: human gate 
 
@@ -86,6 +94,7 @@ def human_gate_node(state: AgentState) -> dict:
 
     }
 
+@observe(name="verify_recovery")
 def _verify_recovery(
     alert_name: str,
     service: str, 
@@ -93,6 +102,7 @@ def _verify_recovery(
     grace_period: int = 30,
     polls: int = 5,
     interval: int = 15,
+    min_consecutive: int = 4,
     )-> VerificationResult:
     """
     verifies a fix actually worked using a fast, two step check to prevent false esclation.
@@ -111,6 +121,11 @@ def _verify_recovery(
     print(f"[execute] waiting {grace_period}s grace period for action to propagate...")
     time.sleep(grace_period)
 
+    consecutive_healthy = 0
+    first_healthy_ts = None
+    curr_p99 = None
+    curr_error = None
+
     for i in range(polls):
         print(f"[execute] verification poll {i+1}/{polls}:")
 
@@ -128,7 +143,8 @@ def _verify_recovery(
                 p99_latency_s=curr_p99,
                 error_rate=curr_error,
                 t_clear=datetime.datetime.utcnow().isoformat(),
-                signal="alertmanager"
+                signal="alertmanager",
+                healthy_run_len=max(consecutive_healthy, min_consecutive),
             )
 
         #primary: prometheus metric comparison 
@@ -162,18 +178,27 @@ def _verify_recovery(
             else:
                 print(f"[execute] error_rate={curr_error:.4f} still elevated (pre={pre_error}, threshold={ERROR_RATE_WARNING})")
 
-        # if either key metric recovered, count it as verified
+        #require at least min_consecutive healthy checks before confirming recovery to avoid premature close on single dip
         if p99_ok or error_ok:
-            print(f"[execute] Prometheus metrics confirm recovery (p99_ok={p99_ok}, error_ok={error_ok})")
-            return VerificationResult(
-                verified=True,
-                p99_latency_s=curr_p99,
-                error_rate=curr_error,
-                t_clear=datetime.datetime.utcnow().isoformat(),
-                signal="p99" if p99_ok else "error_rate"
-            )
+            consecutive_healthy += 1
+            if first_healthy_ts is None:
+                first_healthy_ts = datetime.datetime.utcnow().isoformat()
+            print(f"[execute] Metrics healthy ({consecutive_healthy}/{min_consecutive} consecutive checks)")
+            if consecutive_healthy >= min_consecutive:
+                print(f"[execute] Prometheus metrics confirm sustained recovery (p99_ok={p99_ok}, error_ok={error_ok}, run_len={consecutive_healthy})")
+                return VerificationResult(
+                    verified=True,
+                    p99_latency_s=curr_p99,
+                    error_rate=curr_error,
+                    t_clear=first_healthy_ts,
+                    signal="p99" if p99_ok else "error_rate",
+                    healthy_run_len=consecutive_healthy,
+                )
+        else:
+            consecutive_healthy = 0
+            first_healthy_ts = None
 
-        print(f"[execute] Metrics not yet recovered. Waiting {interval}s before next poll...")
+        print(f"[execute] Metrics not yet stable/recovered. Waiting {interval}s before next poll...")
         time.sleep(interval)
 
     print(f"[execute] Exhausted {polls} polls — metrics did not recover")
@@ -182,7 +207,8 @@ def _verify_recovery(
         p99_latency_s=curr_p99,
         error_rate=curr_error,
         t_clear=None,
-        signal=None
+        signal=None,
+        healthy_run_len=consecutive_healthy,
     )
 
 def _signal_expr(service: str, signal: Optional[str]) -> tuple[str, float, str]:
@@ -344,6 +370,7 @@ def execute_node(state: AgentState) -> dict:
     signal = verification_evidence.get('signal') if verification_evidence else None
     expr, threshold, comparison = _signal_expr(service, signal)
 
+    polled_healthy = verification_evidence.get("healthy_run_len", 0) if verification_evidence else 0
     ev = build_clear_evidence(
         expr=expr, 
         threshold=threshold,
@@ -352,6 +379,7 @@ def execute_node(state: AgentState) -> dict:
         t_now=datetime.datetime.utcnow(),
         comparison=comparison,
         t_clear_polled=t_clear_polled,
+        polled_healthy_run_len=polled_healthy,
     )
     g3 = evaluate_gate3(ev, action_executed_at.timestamp(), tolerance_sec=tolerance)
     gate1_claim = bool(claim_id and t_claim)
@@ -360,7 +388,9 @@ def execute_node(state: AgentState) -> dict:
     #gate4 stay tied to the polling based verified flag
     # when recovery happened, gate 4 is the smpler did it recover at all check
     gate4_verified = bool(verified)
-    gate5_stable = True 
+    # gate 5 requires at least 2 consecutive healthy observations.
+    # Ceiling: bounded by verification polling duration.asynchronous post-incident monitoring.
+    gate5_stable = bool(ev.healthy_run_len and ev.healthy_run_len >= 2)
     
     resolution_cause = final_label(
         gate1_claim=gate1_claim,
