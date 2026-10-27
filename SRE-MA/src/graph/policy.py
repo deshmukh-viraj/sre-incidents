@@ -2,14 +2,14 @@
 graph/policy.py
 --------------
 
-policy-as-code gate between planning and execution. 
+policy-as-code gate between planning and execution.
 the agent proposes, this module disposes.
 
 """
 
 import json
 from typing import Literal
-from src.graph.routing import DELTA_EFFECT_SECONDS
+from src.graph.routing import DELTA_EFFECT_SECONDS, DIAGNOSIS_CONFIDENCE
 
 ALLOWED_WRITE_TOOLS = set(DELTA_EFFECT_SECONDS.keys())
 
@@ -52,14 +52,24 @@ def route_after_policy(state) -> Literal["human_gate", "execute", "escalate"]:
     return "human_gate" if state.get("requires_approval") else "execute"
 
 
-def route_after_critic(state) -> Literal["remediator", "deep_investigation", "escalate"]:
-    """P0-2: ungrounded/empty proposals go back to investigation with the critique; plan-quality fixes go to the remediator."""
+def route_after_critic(state) -> Literal["repair_proposal", "remediator", "deep_investigation", "escalate"]:
+    """the critic-rejection ladder instead of 'loop-or-escalate':
+    reject -> cheap one-call repair -> deterministic runbook plan when the best
+    hypothesis confidence is high -> full re-investigation -> escalate. The
+    agent's own escalation request or the hard reject ceiling (escalate_reason
+    set by the critic) always escalates first, and a double rejection must never
+    send an empty plan to the remediator (INC-SLOBur-FF52)."""
+    if state.get("escalate_reason"):
+        return "escalate"
     if not state.get("requires_retry"):
         return "remediator"  # accepted proposal -> normal path (unchanged)
-    if state.get("critic_reject_count", 0) >= 2:
-        return "escalate"  # retry limit: no infinite loops
     critique = state.get("critique") or ""
     if "empty proposal" in critique or "ungrounded" in critique:
-        return "deep_investigation"
+        if not state.get("repair_attempts"):
+            return "repair_proposal"  # one LLM call, no tool rounds
+        conf = max((h.get("confidence", 0) for h in (state.get("hypotheses") or [])), default=0)
+        if conf >= DIAGNOSIS_CONFIDENCE:
+            return "remediator"  # deterministic plan from an already-high-confidence diagnosis
+        return "deep_investigation"  # full re-investigation within the usual loop budget
     return "remediator"
     
