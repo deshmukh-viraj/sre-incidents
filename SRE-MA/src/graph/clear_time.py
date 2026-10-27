@@ -170,22 +170,25 @@ def build_clear_evidence(
     comparison: str = "below",
     pre_window_sec: int = 120,
     t_clear_polled=None,
+    polled_healthy_run_len: int = 0,
     fetch: Optional[Callable[..., list[tuple[float, float]]]] = None,
     **fetch_kwargs,
 ) -> ClearEvidence:
-    """Fetches metric window and evaluates clear evidence."""
+    """fetches metric window and evaluates clear evidence."""
     fetch = fetch or query_range
     a_start = _to_unix(t_action_start)
     a_end = _to_unix(t_action_end)
 
     samples = fetch(expr, a_start - pre_window_sec, _to_unix(t_now), step, **fetch_kwargs)
 
-    # in simulation prometheus has no range history; fall back to polled timestamp
-    # ceiling: if both are missing we truly can't attribute (gate 3 will fail correctly)
+    #in simulation prometheus has no range history; fall back to polled timestamp
+    #if range query is empty, inherit the healthy_run_len verified during live polling.
+    #ceiling relies on live polling sample count. Upgrade: ensure Prometheus persistence across scenarios.
     if not samples and t_clear_polled is not None:
         ev = ClearEvidence(
             t_clear_true=_to_unix(t_clear_polled),
             clear_source=CLEAR_SOURCE_POLLED,
+            healthy_run_len=polled_healthy_run_len,
             samples_seen=0,
         )
         ev.notes.append("prometheus returned no range samples; using polled t_clear as fallback")
@@ -196,6 +199,8 @@ def build_clear_evidence(
     if ev.t_clear_true is None and t_clear_polled is not None:
         ev.t_clear_true = _to_unix(t_clear_polled)
         ev.clear_source = CLEAR_SOURCE_POLLED
+        if polled_healthy_run_len > 0:
+            ev.healthy_run_len = max(ev.healthy_run_len, polled_healthy_run_len)
         ev.notes.append("prometheus range query returned insufficient samples; using polled t_clear as fallback")
 
     pre = [(ts, v) for ts, v in samples if ts <= a_start]
