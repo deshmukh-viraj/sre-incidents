@@ -81,12 +81,19 @@ def escalate_node(state: AgentState) -> dict:
     print(f"\n[escalate] {reason}: {incident_id}")
     print(message)
 
-    notify_slack(
-        message=message,
-        channel="incidents",
-        severity="critical",
-        incident_id=incident_id
-    )
+    # the SEV1 early-page hop already woke the on-call; re-paging is noise —
+    # the human just needs the terminal status so they can cancel or take over
+    if state.get("early_paged"):
+        print("[escalate] early page already delivered — recording status without a second page")
+        message = (f"{message}\n\n(early page was delivered while the agent kept working; "
+                   f"latest status above — cancel/alert-hold if the fix verified)")
+    else:
+        notify_slack(
+            message=message,
+            channel="incidents",
+            severity="critical",
+            incident_id=incident_id
+        )
 
     return {
         "resolution_status": ResolutionStatus.ESCALATED.value,
