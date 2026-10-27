@@ -15,6 +15,54 @@ NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USERNAME")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
+
+SERVICE_METRICS = {
+    "payment_gateway": [
+        'http_requests_total{service="payment_gateway"}',
+        'http_request_duration_seconds_bucket{service="payment_gateway"}',
+        'circuit_breaker_state{service="payment_gateway"}',
+        'payment_transactions_total',
+        'slo_error_budget_remaining_ratio{service="payment_gateway"}',
+    ],
+    "card_rails": [
+        'circuit_breaker_state{upstream="card_rails"}',
+        'net_conntrack_dialer_conn_failed_total',
+    ],
+    "account_ledger": [
+        'http_requests_total{service="account_ledger"}',
+        'http_request_duration_seconds_bucket{service="account_ledger"}',
+        'circuit_breaker_state{service="account_ledger"}',
+    ],
+    "fraud_detector": [
+        'http_requests_total{service="fraud_detector"}',
+        'fraud_model_prediction_latency_seconds_bucket',
+        'fraud_score_bucket',
+    ],
+    "api_gateway": [
+        'http_requests_total{service="api_gateway"}',
+        'http_request_duration_seconds_bucket{service="api_gateway"}',
+    ],
+    "kyc_service": [
+        'http_requests_total{service="kyc_service"}',
+        'http_request_duration_seconds_bucket{service="kyc_service"}',
+    ],
+    "notification_service": [
+        'http_requests_total{service="notification_service"}',
+        'http_request_duration_seconds_bucket{service="notification_service"}',
+    ],
+    "postgres_primary": [
+        'db_connection_pool_active{db="postgres_primary"} / db_connection_pool_max{db="postgres_primary"}',
+        'db_query_duration_seconds_bucket',
+    ],
+    "redis": [],
+    "kafka": [],
+}
+METRIC_LABEL_NOTES = (
+    "LABEL GOTCHAS: db pool metrics use db=\"postgres_primary\" (NOT service=). "
+    "card_rails/postgres are not scraped services — card_rails appears only as the "
+    "upstream label on circuit_breaker_state. Always use the exact names/labels above."
+)
+
 try:
     from neo4j import GraphDatabase
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
@@ -32,7 +80,7 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
         with driver.session() as session:
             for service in affected_services:
                 
-                # 1. downstream dependencies
+                #downstream dependencies
                 deps_result = session.run("MATCH (s:Service {name: $service})-[:DEPENDS_ON]->(dep:Service) RETURN dep.name AS dependency, dep.doc_summary AS doc_summary", service=service)
                 deps = [dict(r) for r in deps_result]
                 if deps:
@@ -43,13 +91,13 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
                 else:
                     context_sections.append(f"[Topology] {service} has no downstream dependencies — it is likely a root node (database or external API).")
 
-                # 2. upstream services
+                #upstream services
                 upstream_result = session.run("MATCH (caller:Service)-[:DEPENDS_ON]->(s:Service {name: $service}) RETURN caller.name AS caller", service=service)
                 upstream = [r["caller"] for r in upstream_result]
                 if upstream:
                     context_sections.append(f"[Impact] {service} is called by: {', '.join(upstream)}. Degradation here cascades to all of them.")
 
-                # 3. known remediations
+                #known remediations
                 if alert_name:
                     rem_q = "MATCH (a:Alert {name: $alert_name})-[:RESOLVED_BY]->(r:Remediation) RETURN r.action AS action, r.success_rate AS success_rate, r.avg_mttr_s AS avg_mttr_s ORDER BY r.success_rate DESC LIMIT 3"
                     rem_result = session.run(rem_q, alert_name=alert_name)
@@ -62,9 +110,9 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
                     rem_lines = [f"  - {r['action']} (success_rate={r['success_rate']:.0%}, avg_mttr={r['avg_mttr_s']}s)" for r in remediations]
                     context_sections.append(f"[Known Fixes for {service}]:\n" + "\n".join(rem_lines))
 
-                # 4. past incidents
+                #past incidents
                 if alert_name:
-                    past_q =( 
+                    past_q = (
                     "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) "
                     "WHERE p.success = true AND p.service = $service "
                     "RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, "
@@ -80,6 +128,17 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
                 if records:
                     past = records[0]
                     context_sections.append(f"[Past Incident] Similar incident on {service}: root_cause='{past['root_cause']}', fixed_by='{past['action_taken']}', mttr={past['business_mttr_seconds']}s, success={past['success']}.")
+
+                #prometheus metric names for this service (and its dependencies)
+                metrics = SERVICE_METRICS.get(service, [])
+                if metrics:
+                    context_sections.append(f"[Metrics: {service}] Exact PromQL to query: {', '.join(metrics)}")
+                for dep in deps:
+                    dep_metrics = SERVICE_METRICS.get(dep['dependency'], [])
+                    if dep_metrics:
+                        context_sections.append(f"[Metrics: {dep['dependency']}] Exact PromQL to query: {', '.join(dep_metrics)}")
+                if metrics or deps:
+                    context_sections.append(f"[Label Notes] {METRIC_LABEL_NOTES}")
 
     except Exception as e:
         return f"knowledge graph query failed: {str(e)}"
