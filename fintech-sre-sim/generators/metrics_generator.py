@@ -225,7 +225,7 @@ compliance_events_total = Counter(
     registry=REGISTRY,
 )
 
-# SLO tracking
+#SLO tracking
 slo_error_budget_remaining = Gauge(
     "slo_error_budget_remaining_ratio",
     "Remaining error budget ratio (1.0 = full)",
