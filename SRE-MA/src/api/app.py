@@ -291,10 +291,15 @@ def _attribution_fields(result: dict) -> dict:
 
 def _resume_agent(incident_id: str, config: dict):
     try:
+        inc_data = _incidents.get(incident_id, {})
+        current_status = str(inc_data.get("status", "")).lower()
+        if current_status in ("resolved", "escalated", "failed", "executed_unverified", "mitigated"):
+            print(f"[agent] Incident {incident_id} is already '{current_status}'. Skipping resume.")
+            return
+
         active_gauge.inc()
         print(f"[agent] Resuming graph for incident {incident_id}")
 
-        inc_data = _incidents.get(incident_id, {})
         raw_signals = inc_data.get("raw_signals") or {}
         trace_id = inc_data.get("trace_id")
 
@@ -625,37 +630,68 @@ async def get_incident(incident_id: str):
     return incident_data
 
 
-@app.get("/incidents/{incident_id}/approve")
-async def approve_incident(incident_id: str,background_tasks: BackgroundTasks,approver: str = "admin",
-notes: str = ""):
+@app.post("/incidents/{incident_id}/approve")
+async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, req: ApprovalRequest):
     if incident_id not in _incidents:
-        raise HTTPException(status_code=404,detail=f"Incident {incident_id} not found")
-        
+        raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")
+
+    incident = _incidents[incident_id]
+    current_status = str(incident.get("status", "")).lower()
+
+    #dont allow approving an already completed incident
+    if current_status in ("resolved", "escalated", "failed", "executed_unverified", "mitigated"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Incident {incident_id} is already '{current_status}'. Cannot approve a completed incident."
+        )
+
+    #prevent duplicate approval triggers
+    if incident.get("approved_at"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Incident {incident_id} has already been approved."
+        )
+
     try:
         from src.graph.orchestrator import app as agent_graph
         config = {
             "configurable": {"thread_id": incident_id}
         }
-        agent_graph.update_state(config, values={"human_approved": True}, as_node="human_gate")
 
-        _incidents[incident_id]["approved_by"] = approver
-        _incidents[incident_id]["approved_at"] = _utcnow().isoformat()
+        #verify the graph is actually waiting at human_gate
+        state = agent_graph.get_state(config)
+        if not state or not state.next:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Incident {incident_id} graph is not awaiting approval (status={current_status})."
+            )
 
-        if notes:
-            _incidents[incident_id]["approval_notes"] = notes
+        agent_graph.update_state(config, values={"human_approved": req.approved, 
+        "human_gate": "human_approved",
+        "approved_by": req.approver,
+        "approved_at": _utcnow().isoformat(),
+        },
+        as_node="human_gate")
 
-        trace_id = _incidents[incident_id].get("trace_id")
+        incident["approved_by"] = req.approver
+        incident["approved_at"] = _utcnow().isoformat()
+        if req.notes:
+            incident["approval_notes"] = req.notes
+
+        trace_id = incident.get("trace_id")
         if trace_id:
-            log_human_feedback(trace_id=trace_id, approved=True, notes=notes, approver=approver)
+            log_human_feedback(trace_id=trace_id, approved=req.approved, notes=req.notes, approver=req.approver)
 
-        background_tasks.add_task( _resume_agent,incident_id,config)
+        background_tasks.add_task(_resume_agent, incident_id, config)
 
         return {
-            "status": "approved",
+            "status": "approved" if req.approved else "rejected",
             "incident_id": incident_id,
-            "approver": approver
+            "approver": req.approver
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to resume graph: {e}")
 
