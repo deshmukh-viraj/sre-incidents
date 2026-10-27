@@ -10,17 +10,22 @@ import os
 import re
 from src.graph.state import AgentState
 from src.graph.routing import classify_blast_radius, requires_human_approval, DIAGNOSIS_CONFIDENCE
+from src.tools.sre_tool import notify_slack
 
 
-#node: remediator 
+#node: remediator
 
 def remediator_node(state: AgentState) -> dict:
     if state.get("action_plan"):
         return {}
 
-    # critic retry: rebuild the plan from the proposal the harness actually made
+    # critic retry: rebuild the plan from the proposal the harness actually made.
+    # freshest-first: state fields beat a stale scratchpad replay that would
+    # resurrect an earlier (possibly rejected) proposal.
     if state.get("requires_retry"):
-        plan = _extract_from_scratchpad(state)
+        plan = _item_from_state_fields(state)
+        if plan is None:
+            plan = _extract_from_scratchpad(state)
         if plan is None:
             plan = _llm_extract_proposal(state)
         if plan:
@@ -222,6 +227,103 @@ def _check_correlated_rb_consensus(state: AgentState) -> Optional[str]:
 
 
 #task 3.4: extraction helpers for the critic retry path
+
+def _item_from_state_fields(state: AgentState) -> Optional[list]:
+    """build the action item from the CURRENT proposed_* / llm_suggested_action
+    fields (written by deep_investigation's writeback or the repair hop)."""
+    tool, act = state.get("proposed_tool"), state.get("llm_suggested_action")
+    if not tool or not act or tool in ("escalate", "escalate_with_reason"):
+        return None
+    service = state.get("proposed_target") or (state.get("affected_services") or ["unknown"])[0]
+    blast = state.get("proposed_blast_radius") or classify_blast_radius({"tool": tool, "params": {"service": service}})
+    item = {
+        "action": act,
+        "tool": tool,
+        "params": {"service": service},
+        "blast_radius": blast,
+        "reversible": True,
+        "requires_approval": False,
+        "executed": False,
+        "result": None,
+    }
+    item["requires_approval"] = requires_human_approval(item)
+    return [item]
+
+
+def repair_proposal_node(state: AgentState) -> dict:
+    """critic rejected the proposal (empty/ungrounded): ONE structured LLM call
+    (temperature 0, zero tool rounds, no re-investigation) rewrites the proposal
+    fields against the critique. a full re-investigation stays reserved for when
+    this also fails (route_after_critic). SEV1 pages the human at the first hop
+    so retries never delay the page (communicator already generated
+    escalation_message in parallel with the detector; escalate dedupes)."""
+    print(f"\n[repair] Critic rejected #{state.get('critic_reject_count', 0)} "
+          f"— cheap one-call repair (no tool rounds)")
+    out: dict = {"repair_attempts": (state.get("repair_attempts") or 0) + 1}
+    if _early_page(state):
+        out["early_paged"] = True
+
+    scratchpad = "\n".join(str(e) for e in state.get("investigation_scratchpad", [])[-12:])
+    try:
+        from langchain_core.messages import SystemMessage, HumanMessage
+        from src.agents.utils import _get_llm
+        from src.agents.schemas import RemediationProposal
+        llm = _get_llm(temperature=0.0, simple=True).with_structured_output(RemediationProposal)
+        resp = llm.invoke([
+            SystemMessage(
+                content="You are repairing a remediation proposal the critic rejected. "
+                "Use only facts from the investigation scratchpad; satisfy the critic's "
+                "rejection exactly. tool must be a whitelisted write tool (set_feature_flag, "
+                "rollback_deployment, rolling_restart, capture_diagnostics, notify, "
+                "execute_kg_suggestion, kubectl_patch_deployment, kubectl_restart_deployment, "
+                "kubectl_scale). If no valid proposal is possible, use tool='capture_diagnostics' "
+                "and put 'escalate: <reason>' in the action."
+            ),
+            HumanMessage(
+                content=f"CRITIC REJECTION: {state.get('critique') or 'unspecified'}\n"
+                        f"PROPOSED SO FAR: tool={state.get('proposed_tool')}, "
+                        f"target={state.get('proposed_target')}\n\nSCRATCHPAD:\n{scratchpad}"
+            ),
+        ])
+    except Exception as e:
+        print(f"[repair] repair LLM failed: {e}")
+        return out
+
+    tool = (getattr(resp, "tool", None) or "").strip()
+    if not tool or tool in ("escalate", "escalate_with_reason"):
+        print("[repair] repair produced no valid tool — leaving fields for the router ladder")
+        return out
+    print(f"[repair] repaired proposal: tool={tool} target={getattr(resp, 'target_service', None)}")
+    out.update({
+        "proposed_tool": tool,
+        "proposed_target": getattr(resp, "target_service", None),
+        "llm_suggested_action": getattr(resp, "action", None) or tool,
+        "proposed_blast_radius": getattr(resp, "blast_radius", None),
+    })
+    return out
+
+
+def _early_page(state: AgentState) -> bool:
+    """deliver the human page NOW instead of after every retry hop: the
+    communicator runs in parallel with the detector and already wrote
+    escalation_message — the relay costs one notify. Not terminal; the agent
+    keeps working. escalate_node skips the duplicate page (early_paged)."""
+    if state.get("severity") != "SEV1" or state.get("early_paged"):
+        return False
+    finding = state.get("root_cause") or state.get("diagnosis_summary") or "root cause under investigation"
+    detail = state.get("escalation_message") or f"Alert: {state.get('alert_name')} | Finding: {finding}"
+    message = (
+        f" *Early page — agent still working*\n"
+        f"Incident: {state.get('incident_id')} | Severity: SEV1\n"
+        f"{detail}\n"
+        f"Action Required: acknowledge now; cancel when the automated fix verifies. "
+        f"The agent continues investigating in the background."
+    )
+    notify_slack(message=message, channel="incidents", severity="critical",
+                 incident_id=state.get("incident_id"))
+    print("[repair] EARLY PAGE sent (human can cancel before fixes execute)")
+    return True
+
 
 def _extract_from_scratchpad(state: AgentState) -> Optional[list]:
     """find the last propose_remediation call in the scratchpad and copy its args into an action plan."""
