@@ -297,7 +297,7 @@ SCENARIO_CASCADING_FAILURE = Scenario(
             duration_seconds=60,
             db_pool_saturation={"postgres_primary": 0.75},
             #both services are affected
-            latency_multiplier={"Payment_gateway":2.0, "account_ledger": 3.0}, 
+            latency_multiplier={"payment_gateway":2.0, "account_ledger": 3.0}, 
             error_rate_override={"account_ledger": 0.05},
         ),
         ScenarioPhase(
