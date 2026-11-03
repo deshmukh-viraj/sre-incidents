@@ -738,12 +738,22 @@ async def agent_status():
         pass
     
     try:
-        import httpx, os
-        resp = httpx.get(f"{os.getenv('PROMETHEUS_URL', 'http://localhost:9090')}/api/v1/query",
-        params={'query': 'up'}, timeout=3.0)
-        prometheus_ok = resp.status_code==200
+        from src.tools.backends.registry import get_backend
+        backend = get_backend("metrics")
+        prometheus_ok = backend is not None and backend.instant(backend.template("service_up")) is not None
     except Exception:
         pass
+
+    try:
+        from src.tools.backends.registry import get_backend as _gb
+        tempo = _gb("traces")
+        if tempo is None:
+            traces_state = "disabled"
+        else:
+            tempo.search(service="payment_gateway", lookback_minutes=5, limit=1)
+            traces_state = "ok"
+    except Exception:
+        traces_state = "unavailable"
 
     total = len(_incidents)
     resolved = sum(1 for i in _incidents.values() if i.get('status') == ResolutionStatus.RESOLVED.value)
@@ -754,7 +764,8 @@ async def agent_status():
         components=ComponentStatus(
             faiss_index = "ok" if faiss_ok else "unavailable",
             neo4j_kg = "ok" if neo4j_ok else "unavailable",
-            prometheus = "ok" if prometheus_ok else "unavailable"
+            prometheus = "ok" if prometheus_ok else "unavailable",
+            traces = traces_state,
         ),
         incidents=IncidentStats(
             total=total,

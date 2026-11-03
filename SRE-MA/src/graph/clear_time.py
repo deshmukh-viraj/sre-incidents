@@ -133,8 +133,14 @@ def query_range(
     timeout: float = 10.0,
 ) -> list[tuple[float, float]]:
 
-    """query prometheus range api using standard library urllib"""
-    base_url = (base_url or os.getenv("PROMETHEUS_URL", "http://localhost:9090")).rstrip("/")
+    """query the metrics backend range api; url/timeout default to the active pack"""
+    if base_url is None:
+        from src.tools.backends.registry import get_backend
+        backend = get_backend("metrics")
+        fallback = os.getenv("PROMETHEUS_URL") or "http://localhost:9090"
+        base_url = backend.url if backend else fallback
+        timeout = backend.cfg.timeout_s if backend else timeout
+    base_url = base_url.rstrip("/")
     params = urllib.parse.urlencode(
         {"query": expr, "start": f"{_to_unix(start):.3f}", "end": f"{_to_unix(end):.3f}", "step": f"{step}s"}
     )

@@ -15,7 +15,6 @@ from langgraph.prebuilt import create_react_agent
 import re
 from src.agents.utils import _get_llm, calculate_cost, _accumulate_usage
 from src.tools.agent_tool import ALL_TOOLS, READ_TOOLS, propose_remediation, escalate_with_reason
-from src.tools.kg_tool import SERVICE_METRICS
 from src.graph.routing import (
     P99_LATENCY_WARNING, ERROR_RATE_WARNING, THROTTLE_RATE_HIGH,
     DB_POOL_WARNING, CIRCUIT_BREAKER_OPEN, DECLINE_RATE_HIGH,
@@ -40,7 +39,8 @@ INVESTIGATOR_PROMPT = (
     "YOU ARE AN EXPERT SRE INVESTIGATING AN INCIDENT WITH NO KNOWN RUNBOOK MATCH "
     "EACH TOOL CALL MUST TEST ONE HYPOTHESIS; NEVER INVENT METRICS VALUES "
     "RULE 1: start with query_topology(primary service) for dependencies, past incidents "
-    "and exact PromQL. The PromQL returned by query_topology is authoritative — use it directly. "
+    "and the exact queries for this stack. Queries returned by query_topology are "
+    "authoritative — pass them to query_prometheus_metric unchanged. "
     "Only call list_metrics(service) as a FALLBACK if a query returns empty or errors. "
     "You have a budget of {max_rounds} tool rounds. Prioritize the most diagnostic query first: "
     "for alerts mentioning DB pool pressure, query the pool metrics first; "
@@ -52,9 +52,9 @@ INVESTIGATOR_PROMPT = (
     "PARALLEL EXECUTION: When multiple independent queries can be made in the same round, "
     "batch them into a single tool call batch. For example, p99 latency, error rate, "
     "and DB pool queries are independent and should be issued together.\n"
-    "PROMQL VALIDATION: Before executing any query_prometheus_metric, ensure the PromQL has "
-    "balanced brackets and that rate()/increase() functions include a range selector (e.g., [5m]). "
-    "Malformed queries will be rejected with a structured error.\n"
+    "QUERY VALIDATION: you do not need to know the query language — the backend "
+    "validates every query and returns a structured error explaining what to fix. "
+    "On an error, prefer an exact query from query_topology/list_metrics over editing your own.\n"
     "NO DATA IS NOT PROOF OF ABSENCE: an empty or erroring query means that signal is "
     "unavailable, not that the fault is absent. Record which query returned nothing; "
     "never base an escalation purely on missing data — escalate on the evidence you have.\n"
@@ -219,8 +219,10 @@ def deep_investigation_node(state) -> dict:
             f"You MUST query these services specifically. Do not limit investigation to {primary_service} only."
         )
 
-    seeds = "\n".join(SERVICE_METRICS.get(primary_service, [])[:6])
-    seed_text = f"\nSEED METRICS (run these first):\n{seeds}" if seeds else ""
+    seed_text = (
+        f"\nSEED QUERIES: query_topology('{primary_service}') returns ready-to-run queries "
+        "for this service — call it first and run those."
+    )
 
     #determine round budget and inject into prompt
     max_rounds = get_max_rounds(state)

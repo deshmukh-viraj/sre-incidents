@@ -213,20 +213,21 @@ def _verify_recovery(
 
 def _signal_expr(service: str, signal: Optional[str]) -> tuple[str, float, str]:
     """
-    maps the verification signal (which metric actually recovered) to the prometheus expression
-    threshold, comparison that gates3's range query needs to ask the same questiion against real history
+    maps the verification signal (which metric actually recovered) to the metric
+    expression, threshold, comparison that gate3's range query needs to ask the
+    same question against real history. expressions come from the metrics adapter
+    template registry — no dialect is authored in this node.
     """
+    from src.tools.backends.registry import get_backend
+
+    metrics = get_backend("metrics")
+    if metrics is None:
+        raise RuntimeError("metrics backend disabled in this environment pack")
     if signal == "error_rate":
-        expr = (
-            f'sum(rate(http_requests_total{{service="{service}", status_code=~"5.."}}[1m])) '
-            f'/ sum(rate(http_requests_total{{service="{service}"}}[1m]))'
-        )
+        expr = metrics.template("error_rate", service=service, window="1m")
         return expr, ERROR_RATE_WARNING, "below"
-    
-    expr = (
-        f'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket'
-        f'{{service="{service}"}}[1m])) by (le))'
-    )
+
+    expr = metrics.template("p99_latency", service=service, window="1m")
     return expr, P99_LATENCY_RECOVERY, "below"
 
 

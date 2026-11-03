@@ -1,57 +1,32 @@
 """
 tools/loki_tool.py
 ------------------
-ask loki for logs.
-keep all the logql stuff here so agents don't have to deal with it.
+log capability facade. LogQL lives in the backend adapter
+(src/tools/backends/loki.py); this module keeps the historical function
+signatures used across the repo.
 """
 
 import os
-import json
-import time
-import urllib.request
-import urllib.parse
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-LOKI_URL = os.getenv("LOKI_URL", "http://localhost:3100")
+from src.tools.backends.registry import get_backend  # noqa: E402
+
+LOKI_URL = os.getenv("LOKI_URL", "http://localhost:3100")  # deprecated; pack url wins
 
 
 def query_loki(logql: str, limit: int = 50, lookback_minutes: int = 10) -> List[Dict]:
     """
-    Execute a LogQL query against Loki.
+    Execute a log query against the active logs backend.
     Returns list of parsed log record dicts.
     """
-    end_ns = int(time.time() * 1e9)
-    start_ns = int((time.time() - (lookback_minutes * 60)) * 1e9)
-
-    try:
-        params = urllib.parse.urlencode({
-            "query": logql,
-            "start": start_ns,
-            "end": end_ns,
-            "limit": limit,
-            "direction": "backward",
-        })
-        url = f"{LOKI_URL}/loki/api/v1/query_range?{params}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=15.0) as resp:
-            data = json.loads(resp.read().decode())
-            result = data.get("data", {}).get("result", [])
-
-        records = []
-        for stream in result:
-            for _ts, line in stream.get("values", []):
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    records.append({"raw": line})
-        return records
-
-    except Exception as e:
-        print(f"[loki_tool] query failed: {e}")
+    backend = get_backend("logs")
+    if backend is None:
         return []
+    return backend.query(logql, limit=limit, lookback_minutes=lookback_minutes)
 
 
 def extract_log_summary(logs: List[Dict], max_records: int = 10) -> List[str]:

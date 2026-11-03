@@ -9,8 +9,9 @@ import json
 import urllib.request
 import os
 from langchain_core.tools import tool
-from src.tools.prometheus_tool import _instant_query
+from src.tools.prometheus_tool import _instant_query, prometheus_url
 from src.tools.loki_tool import query_loki, extract_log_summary
+from src.tools.backends.registry import get_backend
 from src.tools.kg_tool import (
     query_knowledge_graph,
     query_recent_resolved_incident,
@@ -118,9 +119,13 @@ def query_service_logs(service: str) -> str:
     rules out log-visible failure modes).
     """
     try:
-        logql = service if service.startswith("{") else f'{{service="{service}"}}'
-        logs = extract_log_summary(query_loki(logql))
-        return "\n".join(logs[:6]) or "no error logs"
+        logs = get_backend("logs")
+        if logs is None:
+            return "log backend disabled in this environment"
+        selector = service if service.startswith("{") else logs.build_selector(service)
+        logs = logs.query(selector)
+        rows = extract_log_summary(logs)
+        return "\n".join(rows[:6]) or "no error logs"
     except Exception as e:
         return f"log query failed: {e}"
 
@@ -154,10 +159,9 @@ def list_metrics(service: str) -> str:
     Returns 'no curated queries for <service>' for services that are not scraped.
     """
     try:
-        url = f"{PROMETHEUS_URL}/api/v1/label/__name__/values"
-        with urllib.request.urlopen(url, timeout=5.0) as resp:
-            names = json.loads(resp.read().decode()).get("data", [])
-        live = [n for n in names if n.startswith(_APP_METRIC_PREFIXES)]
+        metrics = get_backend("metrics")
+        names = metrics.metric_names(prefixes=_APP_METRIC_PREFIXES) if metrics else None
+        live = names if names is not None else None
     except Exception:
         live = None  # fall through to verified static map
 
