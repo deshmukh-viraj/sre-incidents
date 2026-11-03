@@ -21,4 +21,4 @@ langchain-huggingface
 langchain-openai
 langchain-core
 tenacity
-langchain-nvidia-ai-endpoints
+langchain-nvidia-ai-endpointspytest
