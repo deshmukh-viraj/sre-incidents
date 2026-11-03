@@ -259,7 +259,6 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         requires_retry=False,
         critic_reject_count=0,
         plan_viable=True,
-        escalation_reason=[],
         escalate_reason=None,
         repair_attempts=0,
         early_paged=False

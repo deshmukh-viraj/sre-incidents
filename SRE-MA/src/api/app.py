@@ -98,7 +98,7 @@ attribution_lead_hist = Histogram(
 # any incident in the shadow arm labelled agent_remediated isBY DEFINATION a fals-positive,
 # agent did nothing, so agent fixed nothing. that ratio is the number this whole framework exists to produce.
 import os
-HOLDOUT_RATE = float(os.getenv("ATTRIBUTION_HOLDOUT_RATE"))
+HOLDOUT_RATE = float(os.getenv("ATTRIBUTION_HOLDOUT_RATE", "0.0"))
 _HOLDOUT_SEED = os.getenv("ATTRIBUTION_HOLDOUT_SEED")
 
 def _pick_arm(incident_id: str) -> bool:

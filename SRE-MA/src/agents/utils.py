@@ -95,7 +95,7 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
     openrouter_base = os.getenv("OPENAI_API_BASE")
     groq_key = os.getenv("GROQ_API_KEY")
     cc_key = os.getenv("CODECRAFT_API_KEY")
-    base_url = os.getenv("base_url") or openrouter_base
+    base_url = os.getenv("OPENAI_BASE_URL") or openrouter_base
     primary_model_cc = os.getenv("LLM_MODEL_CC", "deepseek-v4-flash-0731")
 
     models = []
