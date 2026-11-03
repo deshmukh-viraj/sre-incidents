@@ -9,10 +9,29 @@ llm calls, ensuring fast execution and reproducible evaluation runs
 
 from src.graph.state import AgentState
 from src.graph.routing import requires_human_approval, classify_blast_radius
-from src.graph.policy import ALLOWED_WRITE_TOOLS
+from src.graph.policy import ALLOWED_WRITE_TOOLS, REVERSIBLE_WRITE_TOOLS
 from src.tools.kg_tool import get_dependencies
 
-KNOWN_RB = {"RB-001", "RB-002", "RB-003", "RB-004", "RB-005", "RB-006", "KG-Memory"}
+import json
+import os
+
+def _known_runbook_ids() -> set:
+    """runbook ids this deployment actually ships (runbooks.json), plus the
+    KG-memory marker — new runbooks validate instead of being rejected."""
+    try:
+        path = os.path.join(os.path.dirname(__file__), "..", "..", "runbooks", "runbooks.json")
+        with open(path) as fh:
+            return set(json.load(fh).keys())
+    except Exception:
+        return set()
+
+KNOWN_RB = _known_runbook_ids() | {"KG-Memory"}
+
+def _has_tool_results(state: AgentState) -> bool:
+    """did the investigation actually query anything? scratchpad entries written
+    by deep_investigation carry tool results with a 'tool: ' prefix."""
+    return any(str(e).startswith("tool: ") for e in state.get("investigation_scratchpad", []))
+
 
 def critic_node(state: AgentState) -> dict:
     raw = state.get("raw_signals", {})
@@ -44,6 +63,7 @@ def critic_node(state: AgentState) -> dict:
 
     #validate proposal grounding & presence — name WHICH check failed and WHY
     is_rejected = False
+    force_approval = False
     agent_escalated = state.get("escalate_reason") == "agent_escalated"
     if severity in ("SEV1", "SEV2") and (not tool or not act):
         if agent_escalated:
@@ -77,6 +97,13 @@ def critic_node(state: AgentState) -> dict:
             concerns.append(f"ungrounded proposal: target '{tgt}' is neither '{service}' "
                             f"nor in its dependencies ({deps})")
             is_rejected = True
+        elif state.get("diagnosis_mode") == "deep_agents" and not _has_tool_results(state):
+            #spec: autonomous execution requires mandatory tool-result citations.
+            #a proposal with zero recorded tool results is not auto-executed —
+            #a human reviews it instead (no rejection loop, no budget burn).
+            concerns.append("uncited proposal: no tool-result evidence in the investigation "
+                            "scratchpad — routing to human approval")
+            force_approval = True
 
     if is_rejected:
         reject_count += 1
@@ -103,15 +130,20 @@ def critic_node(state: AgentState) -> dict:
     action_plan = []
     if tool and act:
         blast = classify_blast_radius({"tool": tool, "params": {"service": tgt}})
+        citations = [str(e)[6:160] for e in state.get("investigation_scratchpad", [])
+                     if str(e).startswith("tool: ")][-3:]
         action = {"action": act, "tool": tool, "params": {"service": tgt}, "blast_radius": blast,
-                  "reversible": True, "requires_approval": False, "executed": False, "result": None}
+                  "reversible": tool in REVERSIBLE_WRITE_TOOLS, "requires_approval": False,
+                  "executed": False, "result": None}
+        if citations:
+            action["citations"] = citations
         action["requires_approval"] = requires_human_approval(action)
         action_plan = [action]
 
     return {
         "hypotheses": validated or state.get("hypotheses", []),
         "action_plan": action_plan,
-        "requires_approval": any(a.get("requires_approval") for a in action_plan) or bool(issues),
+        "requires_approval": any(a.get("requires_approval") for a in action_plan) or bool(issues) or force_approval,
         "diagnosis_issues": issues,
         "critique": "; ".join(concerns) or "no concerns",
         "root_cause": validated[0]["hypothesis"] if validated else state.get("root_cause"),

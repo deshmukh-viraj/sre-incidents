@@ -18,6 +18,21 @@ APPROVED_KUBECTL_ACTIONS = frozenset({"kubectl_patch_deployment", "kubectl_resta
 ALLOWED_WRITE_TOOLS |= set(APPROVED_KUBECTL_ACTIONS)
 CONFIDENCE_FLOOR_FOR_AUTO = 0.50 # below this, even pod-blast need human
 
+#spec: autonomous execution only for reversible, pod/service-level actions,
+#capped at 2 actions per incident. cluster-level or not-known-reversible
+#actions route to the human gate; plan length is capped with recorded rejections.
+MAX_ACTIONS_PER_INCIDENT = 2
+REVERSIBLE_WRITE_TOOLS = {
+    "set_feature_flag",
+    "rolling_restart",
+    "capture_diagnostics",
+    "notify",
+    "execute_kg_suggestion",
+    "kubectl_patch_deployment",
+    "kubectl_restart_deployment",
+    "kubectl_scale",
+}  # rollback_deployment deliberately absent: reverting is itself the mitigation
+
 def idem_key(incident_id: str, action: dict) -> str:
     return f"{incident_id}: {action.get('tool')}:" \
             f"{json.dumps(action.get('params', {}), sort_keys=True)}"
@@ -36,9 +51,18 @@ def policy_validator_node(state) -> dict:
         if key in executed:
             rejections.append({"action": a.get("action"), "reason": "idempotency check: already executed"})
             continue
+        if str(a.get("blast_radius", "")) == "cluster" or a.get("tool") not in REVERSIBLE_WRITE_TOOLS:
+            # cluster-level or not-known-reversible: never auto-execute, human decides
+            a = {**a, "requires_approval": True}
         if max_conf < CONFIDENCE_FLOOR_FOR_AUTO:
             a = {**a, "requires_approval": True}
         validated.append(a)
+
+    if len(validated) > MAX_ACTIONS_PER_INCIDENT:
+        for extra in validated[MAX_ACTIONS_PER_INCIDENT:]:
+            rejections.append({"action": extra.get("action"),
+                               "reason": f"max {MAX_ACTIONS_PER_INCIDENT} actions per incident"})
+        validated = validated[:MAX_ACTIONS_PER_INCIDENT]
     
     if validated and any(a.get("requires_approval") for a in validated):
        requires_approval = True

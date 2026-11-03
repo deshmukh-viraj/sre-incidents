@@ -6,6 +6,7 @@ sandboxed tool set for the DeepAgent/ReAct investigation harness.
 """
 
 import json
+import threading
 import urllib.request
 import os
 from langchain_core.tools import tool
@@ -45,6 +46,29 @@ METRIC_CATALOG = {
     "slo_error_budget_remaining_ratio": "{service,slo_name}",
     "net_conntrack_dialer_conn_failed_total": "{upstream}",
 }
+
+#per-investigation duplicate-read cache: an identical read query inside one
+#investigation returns the recorded result instead of re-hitting the backend.
+#deep_investigation resets it per run; outside a run the cache is inert.
+_investigation_cache = threading.local()
+
+
+def reset_investigation_cache():
+    _investigation_cache.results = {}
+
+
+def _cached_read(key: str, run):
+    cache = getattr(_investigation_cache, "results", None)
+    if cache is None:
+        return run()
+    if key in cache:
+        print(f"[tool-cache] DUPLICATE read suppressed: {key[:80]}")
+        return (f"[DUPLICATE] You already ran this exact query in this investigation. "
+                f"Recorded result: {str(cache[key])[:180]} — move to a different hypothesis.")
+    result = run()
+    cache[key] = result
+    return result
+
 
 def validate_expr(expr: str) -> tuple[bool, str]:
     """Validate PromQL expression. Returns (is_valid, error_message)."""
@@ -99,7 +123,7 @@ def query_prometheus_metric(expr: str) -> str:
     if not valid:
         return f"ERROR: {err}. Allowed metrics: {list(METRIC_CATALOG.keys())}. Convention: generic names + labels (e.g. db='postgres_primary'). Never use service prefixes."
     try:
-        val = _instant_query(expr)
+        val = _cached_read(f"metric:{expr}", lambda: _instant_query(expr))
         if val is None:
             return f"ERROR: Query '{expr}' returned no data. Use exact metric from list_metrics and verify labels (e.g. db='postgres_primary', not service=)."
         return f"{val}"
@@ -119,13 +143,14 @@ def query_service_logs(service: str) -> str:
     rules out log-visible failure modes).
     """
     try:
-        logs = get_backend("logs")
-        if logs is None:
-            return "log backend disabled in this environment"
-        selector = service if service.startswith("{") else logs.build_selector(service)
-        logs = logs.query(selector)
-        rows = extract_log_summary(logs)
-        return "\n".join(rows[:6]) or "no error logs"
+        def _run():
+            logs = get_backend("logs")
+            if logs is None:
+                return "log backend disabled in this environment"
+            selector = service if service.startswith("{") else logs.build_selector(service)
+            rows = extract_log_summary(logs.query(selector))
+            return "\n".join(rows[:6]) or "no error logs"
+        return _cached_read(f"logs:{service}", _run)
     except Exception as e:
         return f"log query failed: {e}"
 
@@ -142,7 +167,7 @@ def query_topology(service: str) -> str:
     Only fall back to list_metrics when a topology query returns empty or errors.
     """
     try:
-        return query_knowledge_graph([service], "")
+        return _cached_read(f"topology:{service}", lambda: query_knowledge_graph([service], ""))
     except Exception as e:
         return f"kg query failes: {e}"
 
@@ -159,9 +184,12 @@ def list_metrics(service: str) -> str:
     Returns 'no curated queries for <service>' for services that are not scraped.
     """
     try:
-        metrics = get_backend("metrics")
-        names = metrics.metric_names(prefixes=_APP_METRIC_PREFIXES) if metrics else None
-        live = names if names is not None else None
+        def _run():
+            metrics = get_backend("metrics")
+            names = metrics.metric_names(prefixes=_APP_METRIC_PREFIXES) if metrics else None
+            live = names if names is not None else None
+            return live
+        live = _cached_read(f"list_metrics:{service}", _run)
     except Exception:
         live = None  # fall through to verified static map
 

@@ -9,7 +9,7 @@ class IncidentSummaryOutput(BaseModel):
 class HypothesisOutput(BaseModel):
     hypothesis: str = Field(description="plain english root cause theory")
     evidence: List[str] = Field(description="supporting signal snippets")
-    confidence: float = Field(description="0.0 to 1.0")
+    confidence: float = Field(ge=0.0, le=1.0, description="0.0 to 1.0")
     alternative: Optional[str]= Field(default=None, description="competing explanation")
     supporting_runbook: Optional[str]= Field(default=None, description="runbook ID")
 
