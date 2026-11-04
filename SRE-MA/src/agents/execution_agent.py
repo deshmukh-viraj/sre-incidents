@@ -16,7 +16,7 @@ import os
 import datetime
 import time
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from langgraph.types import interrupt
 from src.graph.state import AgentState, ResolutionStatus
 from src.tools.sre_tool import execute_remediation, notify_slack, check_alert_status
@@ -27,6 +27,7 @@ from src.graph.policy import idem_key
 from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS
 from src.graph.clear_time import build_clear_evidence
 from src.graph.attribution_gates import evaluate_gate3, final_label
+from src.agents.schemas import VerificationResult, ExecutionReceipt
 from typing import Optional, Dict, Any, List
 
 try:
@@ -38,31 +39,101 @@ except ImportError:
         return decorator
 
 
-@dataclass
-class VerificationResult:
-    verified: bool
-    p99_latency_s: Optional[float] = None
-    error_rate: Optional[float] = None
-    t_clear: Optional[str] = None
-    signal: Optional[str] = None
-    healthy_run_len: int = 0 
+def _recovery_checker_enabled() -> bool:
+    """B2 RecoveryChecker flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    return os.getenv("MULTI_AGENT", "0") == "1" or \
+        os.getenv("RECOVERY_CHECKER_ENABLED", "0") == "1"
 
-# node 6: human gate 
+
+def _executor_receipts_enabled() -> bool:
+    """B6 typed ExecutionReceipts flag (default 0; MULTI_AGENT=1 enables all)."""
+    return os.getenv("MULTI_AGENT", "0") == "1" or \
+        os.getenv("EXECUTOR_RECEIPTS_ENABLED", "0") == "1"
+
+
+# node 6: human gate
 
 def human_gate_node(state: AgentState) -> dict:
     """
     check if action requires human approval
     if yes, pauses the graph (interrupt). if no, passes through
+
+    B7 (flag HANDOFF_ENABLED, default 0): an un-presented handoff_to_human
+    package (budget/loop exhaustion) is transferred HERE — the single
+    handoff-to-human write path: interrupt carries reason + options; the
+    decision maps to the unchanged approval semantics (approve -> execute,
+    reject -> escalate).
     """
     incident_id = state['incident_id']
-    
+
+    # B7 handoff transfer (before the normal approval check)
+    handoff = os.getenv("MULTI_AGENT", "0") == "1" or \
+        os.getenv("HANDOFF_ENABLED", "0") == "1"
+    pkg = state.get("handoff_to_human") or {}
+    if handoff and pkg and not pkg.get("presented"):
+        print(f"[human_gate] Presenting handoff package for {incident_id} "
+              f"(cause={pkg.get('cause')})")
+        decision = interrupt({
+            "question": "Agent budget/loop exhausted — choose how to proceed",
+            "incident_id": incident_id,
+            "reason": pkg.get("reason"),
+            "options": pkg.get("options", []),
+        })
+        presented = {**pkg, "presented": True,
+                     "decision": decision.get("option") or
+                                 ("approved" if decision.get("approved") else "rejected")}
+        print(f"[human gate] Handoff decision for {incident_id}: {presented['decision']}")
+        return {
+            "human_approved": decision.get("approved", False),
+            "approved_by": decision.get("approver", "system"),
+            "approval_timeout": False,
+            "handoff_to_human": presented,
+            "handoff_count": 1,
+            "ownership": ["human"],
+            "message_ledger": [{**pkg, "kind": "handoff"}],
+        }
+
     #check if any action in the plan requires approval
     needs_approval = any(a.get("requires_approval", False) for a in state.get("action_plan", []))
 
-    # deterministic human approval 
+    # deterministic human approval
     if not needs_approval or os.getenv("SIM_AUTO_APPROVE", "false").lower() == "true":
         print(f"\n[human_gate] Auto approved for {incident_id} (requires_approval={needs_approval})")
         return {"human_approved": True, "approval_timeout": False}
+
+    # natural-calm soak (INC-Paymen-9023): a transient spike can recover while the
+    # pipeline investigates; paging a human for an alert that already calmed is a
+    # false page. SEV2/SEV3 only (SEV1 pages immediately), fresh live signals,
+    # bounded soak. ponytail: fixed 20s poll + NATURAL_CALM_SOAK_S cap (default
+    # 120s) — upgrade path: alertmanager silence API instead of polling.
+    soak = int(os.getenv("NATURAL_CALM_SOAK_S", "120") or 0)
+    if soak > 0 and state.get("severity") in ("SEV2", "SEV3"):
+        from src.agents.deep_investigation import _breaches
+        deadline = time.time() + soak
+        while True:
+            breaches = []
+            for svc in state.get("affected_services") or []:
+                fresh = collect_incident_signals(svc)
+                breaches += _breaches({**state, "raw_signals": fresh})
+            if not breaches:
+                print(f"[human_gate] NATURAL CALM for {incident_id}: live signals healthy "
+                      f"— closing without human page")
+                return {
+                    "human_approved": False,
+                    "natural_calm": True,
+                    "resolution_status": ResolutionStatus.RESOLVED.value,
+                    "resolution_cause": "natural_calm",
+                    "resolution_notes": "alert calmed before approval — live signals healthy, no action taken",
+                    "message_ledger": [{
+                        "timestamp": datetime.datetime.utcnow().isoformat(),
+                        "from_worker": "human_gate", "kind": "note",
+                        "content": "natural calm: live signals recovered before approval; plan not executed",
+                    }],
+                }
+            if time.time() >= deadline:
+                print(f"[human_gate] still breaching after {soak}s soak — paging human ({breaches[0]})")
+                break
+            time.sleep(min(20, max(1, deadline - time.time())))
 
     # llm /destructive (requires approval)
     print(f"[human_gate] Interrupting graph for {incident_id} awaiting for human approval...")
@@ -72,25 +143,28 @@ def human_gate_node(state: AgentState) -> dict:
         if a.get("requires_approval"):
             actions_text += f" {a['action']}\n"
 
-    #send a detailed slack message to ask for approval
-    message = (
-        f" *Approval Required for {incident_id}*\n"
-        f"*Alert*: {state.get('alert_name', 'Unknown')}\n"
-        f"*Diagnosis*: {state.get('diagnosis_summary') or 'Unknown'}\n"
-        f"*Proposed Actions*:\n{actions_text}\n"
-        f"Please approve via the API or dashboard."
-    )
-    notify_slack(message=message, channel="incidents", severity="warning", incident_id=incident_id)
-
+    # P7: page AFTER the decision arrives — the node re-runs from the top on
+    # Command(resume=...), so a pre-interrupt page would fire twice (the
+    # interrupted run's partials are discarded). One page, with the decision.
     human_decsion = interrupt({
         "question": "Do you approve the action plan?",
         "incident_id": incident_id
     })
     print(f"[human gate] Resumed {incident_id} with human input: {human_decsion}")
+    message = (
+        f" *Approval decision for {incident_id}*\n"
+        f"*Alert*: {state.get('alert_name', 'Unknown')}\n"
+        f"*Diagnosis*: {state.get('diagnosis_summary') or 'Unknown'}\n"
+        f"*Proposed Actions*:\n{actions_text}\n"
+        f"*Decision*: {'APPROVED' if human_decsion.get('approved') else 'REJECTED'}"
+        f" by {human_decsion.get('approver', 'system')}\n"
+    )
+    notify_slack(message=message, channel="incidents", severity="warning", incident_id=incident_id)
     return {
-        "human_approved": human_decsion.get("approved", False), 
+        "human_approved": human_decsion.get("approved", False),
         "approved_by": human_decsion.get("approver", "system"),
-        "approval_timeout": False
+        "approval_timeout": False,
+        "approval_notified": True,
 
     }
 
@@ -251,6 +325,7 @@ def execute_node(state: AgentState) -> dict:
 
     all_success = True
     updated_plan = []
+    receipts: List[Dict[str, Any]] = []  # B6: typed ExecutionReceipt dicts
 
     executed_keys = list(state.get("executed_action_keys", []))
     
@@ -310,6 +385,26 @@ def execute_node(state: AgentState) -> dict:
         if result.get("success"):
             executed_keys.append(key)
 
+        # B6: typed receipt from the result we ALREADY have — no new network
+        # calls; the seam where the sandbox executor plugs in later.
+        if _executor_receipts_enabled():
+            try:
+                receipts.append(ExecutionReceipt(
+                    action=action["action"], tool=action["tool"],
+                    params=action.get("params", {}),
+                    success=bool(result.get("success")),
+                    dry_run=bool(result.get("dry_run")),
+                    executed_at=result.get("executed_at"),
+                    result=result.get("result"),
+                    error=result.get("error"),
+                    idem_key=key,
+                ).model_dump())
+            except Exception as e:
+                print(f"[execute] receipt validation fallback: {e}")
+                receipts.append({"action": action["action"], "tool": action["tool"],
+                                 "success": bool(result.get("success")),
+                                 "error": str(e)})
+
     action_executed_at = datetime.datetime.utcnow()
     action_executed_at_iso = action_executed_at.isoformat()
     # agent_mttr = time from invocation to action completion.
@@ -342,7 +437,7 @@ def execute_node(state: AgentState) -> dict:
             grace_period=grace_period
         )
         verified = result.verified
-        final_p99 = result.p99_latency_s 
+        final_p99 = result.p99_latency_s
         final_error = result.error_rate
 
         if verified:
@@ -351,6 +446,22 @@ def execute_node(state: AgentState) -> dict:
             t_clear_polled = result.t_clear
             business_mttr = int((verified_at - start_ts).total_seconds())
             verification_evidence = asdict(result)
+
+    # B2 RecoveryChecker: deterministic ADDITIONAL signal, emitted after the
+    # poll; verdicts unchanged this phase (checker_result is informational).
+    checker_result = None
+    if _recovery_checker_enabled():
+        from src.graph.recovery_checker import check_recovery
+        try:
+            checker_result = check_recovery(
+                result if all_success else VerificationResult(verified=False),
+                pre_metrics,
+                t_action_end=action_executed_at_iso,
+            )
+            print(f"[execute] RecoveryChecker verdict: {checker_result.get('verdict')}")
+        except Exception as e:
+            print(f"[execute] RecoveryChecker failed (non-fatal): {e}")
+            checker_result = {"verdict": "error", "reason": str(e)}
 
 
     if all_success and verified:
@@ -453,6 +564,8 @@ def execute_node(state: AgentState) -> dict:
         "gate4_verified":gate4_verified,
         "gate5_stable":gate5_stable,
         "executed_action_keys": executed_keys,
-        
+        "checker_result": checker_result,
+        **({"receipts": receipts} if _executor_receipts_enabled() else {}),
+
     }
 
