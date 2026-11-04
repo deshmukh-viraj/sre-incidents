@@ -7,15 +7,54 @@ Responsibility:
     - build a structured escalation report (loops, tokens, best hypothesis)
     - notify the on-call team via Slack
     - mark the incident as ESCALATED in state
+    - B7: on budget/loop exhaustion, build the handoff package (reason + options)
+      so the run can land in human_gate (flag HANDOFF_ENABLED, default 0)
 
 Writes to state:
-    resolution_status, escalation_message, resolved_at
+    resolution_status, escalation_message, resolved_at,
+    handoff_to_human (package build — the transfer itself happens in human_gate)
 """
 
 import datetime
+import os
 
 from src.graph.state import AgentState, ResolutionStatus
+from src.graph.routing import MAX_DIAGNOSIS_LOOPS
 from src.tools.sre_tool import notify_slack
+from src.agents.schemas import HandoffMessage
+
+HANDOFF_OPTIONS = [
+    "approve: execute the suggested plan",
+    "take_over: human remediation from here",
+    "dismiss: close the incident as reviewed",
+]
+
+
+def _handoff_enabled() -> bool:
+    """B7 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    return os.getenv("MULTI_AGENT", "0") == "1" or \
+        os.getenv("HANDOFF_ENABLED", "0") == "1"
+
+
+def _exhaustion_cause(state: AgentState) -> str | None:
+    """budget/loop exhaustion detector — the only trigger for a handoff package."""
+    if state.get("budget_exhausted"):
+        return "budget_exhausted"
+    if int(state.get("diagnosis_loops", 0) or 0) >= MAX_DIAGNOSIS_LOOPS:
+        return "diagnosis_loops_exhausted"
+    if int(state.get("critic_reject_count", 0) or 0) >= 3:
+        return "critic_rejected_after_retry"
+    return None
+
+
+def route_after_escalate(state: AgentState):
+    """B7: an UNPRESENTED handoff package lands in human_gate; everything else
+    keeps the pre-change escalate -> communicator edge."""
+    pkg = state.get("handoff_to_human") or {}
+    if _handoff_enabled() and pkg and not pkg.get("presented"):
+        print("[router] escalate -> human_gate (handoff package pending)")
+        return "human_gate"
+    return "communicator"
 
 
 # Node 8: escalate
@@ -99,4 +138,24 @@ def escalate_node(state: AgentState) -> dict:
         "resolution_status": ResolutionStatus.ESCALATED.value,
         "escalation_message": message,
         "resolved_at": datetime.datetime.utcnow().isoformat(),
+        **_handoff_package(state, message, reason),
     }
+
+
+def _handoff_package(state: AgentState, message: str, reason: str) -> dict:
+    """B7: build the handoff package ONCE (the single package builder). The
+    transfer itself (ownership + count) happens in human_gate_node."""
+    if not _handoff_enabled():
+        return {}
+    cause = _exhaustion_cause(state)
+    if not cause or state.get("handoff_to_human") or int(state.get("handoff_count", 0) or 0):
+        return {}
+    pkg = HandoffMessage(
+        timestamp=datetime.datetime.utcnow().isoformat(),
+        from_worker="escalate", to_worker=None, kind="handoff",
+        content=message, options=list(HANDOFF_OPTIONS),
+    ).model_dump()
+    pkg["reason"] = reason
+    pkg["cause"] = cause
+    print(f"[escalate] handoff package built (cause={cause}, options={len(pkg['options'])})")
+    return {"handoff_to_human": pkg}
