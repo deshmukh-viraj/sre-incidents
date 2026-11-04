@@ -8,11 +8,7 @@ from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from pydantic import BaseModel, Field
-
-try:
-    from openai import AuthenticationError as OpenAIAuthError
-except ImportError:
-    OpenAIAuthError = Exception
+from openai import AuthenticationError as OpenAIAuthError
 
 load_dotenv()
 
@@ -42,7 +38,7 @@ def _extract_usage(msg) -> tuple[int, int]:
     if output_tokens == 0:
         details = usage.get("output_token_details", {}) or {}
         output_tokens = details.get("output_tokens", 0)
-    
+
     return input_tokens, output_tokens
 
 
@@ -57,36 +53,14 @@ def _accumulate_usage(messages: list) -> tuple[int, int]:
     return total_input, total_output
 
 
-class Hypothesis(BaseModel):
-    hypothesis: str = Field(description="Plain English root cause")
-    evidence: List[str] = Field(default_factory=list, description="Supporting signals/logs")
-    confidence: float = Field(ge=0.0, le=1.0)
-    alternative: Optional[str] = None
-    supporting_runbook: Optional[str] = None
-
-
-class DiagnoserOutput(BaseModel):
-    hypotheses: List[Hypothesis] = Field(default_factory=list)
-    root_cause: Optional[str] = None
-    diagnosis_summary: Optional[str] = None
-    evidence_summary: Optional[str] = None
-    blast_analysis: Optional[str] = None
-    suggested_remediation_from_context: Optional[str] = None
-
-
-class CommunicatorOutput(BaseModel):
-    status_page_update: str
-    war_room_summary: str
-    escalation_message: Optional[str] = None
-
-
 def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str = None, is_groq: bool = False, is_nvidia: bool = False, simple: bool = False):
+    timeout = 30 if simple else 120
     if is_groq:
-        return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=0, streaming=True)
+        return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=0, streaming=True, timeout=timeout)
     elif is_nvidia:
         return ChatNVIDIA(model=model_name, temperature=temperature, api_key=api_key, base_url=base_url)
 
-    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, stream_usage=True, streaming=True)
+    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, stream_usage=True, streaming=True, timeout=timeout, model_kwargs={"thinking": "disabled" if simple else "enabled"})
 
 
 def _get_llm(temperature: float = 0.1, simple: bool = False):
@@ -111,4 +85,9 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
     primary = models[0]
     return primary
 
-#print(_get_llm().invoke("what is your name?? ").content)
+# ponytail: removed the P9 invoke_structured_chain fallback wrapper chain (2026-10-29) —
+# every caller now uses langchain's llm.with_structured_output() directly.
+# Ceiling: no cross-provider retry when the primary providers fail to produce
+# structured output; each agent's own except block (fail-open paths in verifier/
+# diagnoser/communicator) is the last resort. Upgrade path: a simple retry loop
+# around with_structured_output at the call sites that need it.
