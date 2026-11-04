@@ -29,9 +29,16 @@ from src.graph.state import AgentState
 from src.graph.routing import deterministic_diagnosis, DIAGNOSIS_CONFIDENCE
 from src.tools.kg_tool import query_knowledge_graph
 from src.tools.sre_tool import lookup_runbook
-from src.agents.utils import _get_llm, DiagnoserOutput, calculate_cost
+from src.agents.utils import _get_llm, calculate_cost
+from src.agents.schemas import DiagnoserOutput, HypothesisReport
 
 load_dotenv()
+
+
+def _typed_diagnosis_enabled() -> bool:
+    """B4 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    return os.getenv("MULTI_AGENT", "0") == "1" or \
+        os.getenv("TYPED_DIAGNOSIS_ENABLED", "0") == "1"
 
 
 # node 1: deterministic diagnoser
@@ -132,7 +139,7 @@ def diagnoser_node(state: AgentState) -> dict:
         }
 
 
-    print("[diagnoser] no past incident found will route to LLM diagnoser")
+    print("[diagnoser] no deterministic pattern & no KG memory — routing to deep investigation")
     return {
         "hypotheses": [],
         "diagnosis_mode": "pending_llm",  # 'deterministic' here caused router to waste all retry loops on broken LLM
@@ -168,12 +175,14 @@ def llm_diagnoser(state: AgentState) -> dict:
     # context: Neo4j KG
     kg_context = query_knowledge_graph(affected_services=services, alert_name=alert)
 
-    # signal summary (exclude log summaries / patterns)
+    # signal summary (exclude log summaries / patterns; exclude dunder keys —
+    # R7 ground-truth isolation: sim identity keys must never reach a prompt)
     signals_str = (
         "\n".join(
             f"  {k}: {v}"
             for k, v in raw.items()
             if v is not None and not k.endswith("summaries") and k != "log_patterns"
+            and not str(k).startswith("__")
         )
         or "No signals available"
     )
@@ -238,11 +247,25 @@ Diagnose this incident. Return JSON ONLY.
 """
 
     try:
-        structured_llm = llm.with_structured_output(DiagnoserOutput, include_raw=True)
-        resp_dict = structured_llm.invoke([SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
-        resp, raw_msg = resp_dict["parsed"], resp_dict["raw"]
+        result = llm.with_structured_output(DiagnoserOutput, include_raw=True).invoke(
+            [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
+        resp, raw_msg = result["parsed"], result["raw"]
 
         hypotheses = [h.model_dump() for h in resp.hypotheses]
+        if _typed_diagnosis_enabled():
+            # B4: emit typed HypothesisReport per hypothesis (R3 structured+
+            # fallback); a hypothesis that fails typed validation keeps its raw
+            # dict — the fast path and routing math are untouched.
+            typed = []
+            for h in resp.hypotheses:
+                try:
+                    report = HypothesisReport(
+                        **h.model_dump(), diagnosis_mode="llm", source="llm_diagnoser")
+                    typed.append(report.model_dump())
+                except Exception as te:
+                    print(f"[llm_diagnoser] typed HypothesisReport fallback: {te}")
+                    typed.append(h.model_dump())
+            hypotheses = typed
         root_cause = resp.root_cause
         llm_action = resp.suggested_remediation_from_context
         diagnosis_summary = resp.diagnosis_summary
@@ -275,6 +298,8 @@ Diagnose this incident. Return JSON ONLY.
             "total_input_tokens": state.get("total_input_tokens", 0) + input_tokens,
             "total_output_tokens": state.get("total_output_tokens", 0) + output_tokens,
             "token_cost_usd": state.get("token_cost_usd", 0.0) + cost,
+            **({"prompt_versions": {"llm_diagnoser": "llm-diagnoser-v1"}}
+               if _typed_diagnosis_enabled() else {}),
         }
 
     except Exception as e:
