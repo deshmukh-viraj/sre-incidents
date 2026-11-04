@@ -96,3 +96,23 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
 # structured output; each agent's own except block (fail-open paths in verifier/
 # diagnoser/communicator) is the last resort. Upgrade path: a simple retry loop
 # around with_structured_output at the call sites that need it.
+
+
+def structured_invoke(schema, messages, temperature: float = 0.1, simple: bool = False,
+                      llm=None) -> dict:
+    """provider-tolerant structured output: returns {"parsed", "raw", "usage"}.
+    llm=None builds one via _get_llm. ChatNVIDIA's with_structured_output does
+    not support include_raw=True — on NVIDIA the parsed model comes back
+    directly and token usage is reported as unavailable (0/0) rather than
+    crashing the worker."""
+    llm = llm or _get_llm(temperature=temperature, simple=simple)
+    if isinstance(llm, ChatNVIDIA):
+        parsed = llm.with_structured_output(schema).invoke(messages)
+        return {"parsed": parsed, "raw": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0}}
+    result = llm.with_structured_output(schema, include_raw=True).invoke(messages)
+    raw = result.get("raw")
+    usage = (getattr(raw, "usage_metadata", None)
+             or (getattr(raw, "response_metadata", {}) or {}).get("token_usage")
+             or {})
+    return {"parsed": result.get("parsed"), "raw": raw, "usage": usage}

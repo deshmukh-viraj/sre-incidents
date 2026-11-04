@@ -66,7 +66,12 @@ DELTA_EFFECT_SECONDS = {
 # exports the healthy series (60s export granularity), (d) Prometheus re-evals
 # and pushes the resolve. ponytail: 75s = 15s propagation + 60s export ceiling;
 # the remaining wait is absorbed by the verification polls themselves.
-REMOTE_FLAG_EFFECT_SECONDS = 75
+REMOTE_FLAG_EFFECT_SECONDS = 300
+REMOTE_FLAG_PROPAGATION_SECONDS = 75
+# the demo's alert uses increase(...[5m]) >= 4: after a real fix the trailing
+# 5m window takes ~2-4 min to dilute below threshold, plus the AM group wait.
+# gate-3 tolerance = this + VERIFICATION_OVERHEAD_SECONDS; 75s was measured
+# too tight on the AWS otel-demo (real fix -> AM resolve ~150-240s lead).
 
 
 #stability windows (gate 5)#stability windows determine how long we wait after an action before trusting metrics again

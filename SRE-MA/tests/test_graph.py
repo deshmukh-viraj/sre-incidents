@@ -37,4 +37,5 @@ def test_webhook_smoke():
         pytest.skip(f"agent API not running on {API}")
     assert response.status_code in (200, 202), response.text
     body = response.json()
-    assert "incident_id" in body or "status" in body
+    # v2 webhook shape: {"created": [incident_id, ...], "count": N, ...}
+    assert body.get("created") or body.get("incident_id") or body.get("status"), body

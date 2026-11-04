@@ -25,7 +25,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from src.graph.state import AgentState
 from src.agents.schemas import VerificationChallenge
-from src.agents.utils import _get_llm, calculate_cost
+from src.agents.utils import _get_llm, calculate_cost, structured_invoke
 from src.tools import dispatcher
 from src.tools.agent_tool import METRIC_CATALOG, validate_expr
 
@@ -88,8 +88,8 @@ def _evidence_of(state: AgentState) -> str:
 
 
 def _invoke_structured(llm, schema, messages):
-    """structured output via langchain with_structured_output; returns (parsed, raw)."""
-    result = llm.with_structured_output(schema, include_raw=True).invoke(messages)
+    """structured output via the provider-tolerant helper; returns (parsed, raw)."""
+    result = structured_invoke(schema, messages, llm=llm)
     return result["parsed"], result["raw"]
 
 

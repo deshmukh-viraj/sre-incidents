@@ -20,7 +20,7 @@ import os
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from src.graph.state import AgentState
-from src.agents.utils import _get_llm, calculate_cost
+from src.agents.utils import _get_llm, calculate_cost, structured_invoke
 from src.agents.schemas import CommunicatorOutput
 
 load_dotenv()
@@ -124,13 +124,14 @@ Guidelines:
 {facts_guideline}"""
 
     try:
-        result = _get_llm(temperature=0.1, simple=True).with_structured_output(
-            CommunicatorOutput, include_raw=True).invoke([HumanMessage(content=prompt)])
+        result = structured_invoke(CommunicatorOutput, [HumanMessage(content=prompt)],
+                                   temperature=0.1, simple=True,
+                                   llm=_get_llm(temperature=0.1, simple=True))
         resp, raw_msg = result["parsed"], result["raw"]
 
-        usage = raw_msg.usage_metadata or raw_msg.response_metadata.get("token_usage", {})
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
+        usage = result["usage"] or {}
+        input_tokens = usage.get("input_tokens", 0) or 0
+        output_tokens = usage.get("output_tokens", 0) or 0
         cost = calculate_cost(input_tokens, output_tokens)
 
         #never send escalation messages for resolved incidents or SEV3

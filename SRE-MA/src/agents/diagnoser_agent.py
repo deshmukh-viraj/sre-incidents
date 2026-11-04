@@ -29,7 +29,7 @@ from src.graph.state import AgentState
 from src.graph.routing import deterministic_diagnosis, DIAGNOSIS_CONFIDENCE
 from src.tools.kg_tool import query_knowledge_graph
 from src.tools.sre_tool import lookup_runbook
-from src.agents.utils import _get_llm, calculate_cost
+from src.agents.utils import _get_llm, calculate_cost, structured_invoke
 from src.agents.schemas import DiagnoserOutput, HypothesisReport
 
 load_dotenv()
@@ -247,8 +247,9 @@ Diagnose this incident. Return JSON ONLY.
 """
 
     try:
-        result = llm.with_structured_output(DiagnoserOutput, include_raw=True).invoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
+        result = structured_invoke(DiagnoserOutput,
+                                   [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)],
+                                   llm=llm)
         resp, raw_msg = result["parsed"], result["raw"]
 
         hypotheses = [h.model_dump() for h in resp.hypotheses]

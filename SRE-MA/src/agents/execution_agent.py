@@ -24,7 +24,7 @@ from src.tools.prometheus_tool import collect_incident_signals
 from src.tools.kg_tool import append_past_incident
 from src.graph.policy import idem_key
 
-from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS, REMOTE_FLAG_EFFECT_SECONDS
+from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS, REMOTE_FLAG_EFFECT_SECONDS, REMOTE_FLAG_PROPAGATION_SECONDS
 from src.graph.clear_time import build_clear_evidence
 from src.graph.attribution_gates import evaluate_gate3, final_label
 from src.agents.schemas import VerificationResult, ExecutionReceipt
@@ -369,6 +369,7 @@ def execute_node(state: AgentState) -> dict:
         else:
             if action.get("tool") == "set_feature_flag" and params.get("flag") and params.get("variant"):
                 params = {**params, "remote": True}
+                action = {**action, "params": params}
                 log_stage(incident_id, "REMOTE_EXECUTION", f"flag='{params['flag']}' -> variant='{params['variant']}'")
             result = execute_remediation(
                 action=action["action"],
@@ -434,11 +435,15 @@ def execute_node(state: AgentState) -> dict:
     # remote OTLP demo: alert clearing waits on the 60s OTLP export cadence +
     # the rule's for-window, so remote flag flips get a longer generous budget
     remote_flip = action_plan and any(
-        a.get("tool") == "set_feature_flag" and a.get("params", {}).get("remote")
+        a.get("tool") == "set_feature_flag" and a.get("params", {}).get("flag")
         for a in action_plan
     )
     if remote_flip:
-        grace_period = max(REMOTE_FLAG_EFFECT_SECONDS, grace_period)
+        # short propagation grace (flagd file-watch + demo reload); the 5m
+        # alert-window dilution is absorbed by the verification POLLS below,
+        # not by sleeping — sleeping here inflates the gate-3 lead to the
+        # sleep duration itself (t_clear lands on the first post-grace poll)
+        grace_period = max(grace_period, REMOTE_FLAG_PROPAGATION_SECONDS)
 
     # gate-4: verification initiate safe defaults
     alert_name = state.get("alert_name", "unknown")
@@ -507,6 +512,10 @@ def execute_node(state: AgentState) -> dict:
     # not the polled timestamp above
     tool_name = action_plan[0]["tool"] if action_plan else ""
     tolerance = DELTA_EFFECT_SECONDS.get(tool_name, 30) + VERIFICATION_OVERHEAD_SECONDS
+    if remote_flip:
+        # the demo's alert needs the trailing 5m window to dilute after a real
+        # fix (~2-4 min) plus the AM group wait — give gate-3 the full budget
+        tolerance = max(REMOTE_FLAG_EFFECT_SECONDS + VERIFICATION_OVERHEAD_SECONDS, tolerance)
     signal = verification_evidence.get('signal') if verification_evidence else None
     expr, threshold, comparison = _signal_expr(service, signal)
 
