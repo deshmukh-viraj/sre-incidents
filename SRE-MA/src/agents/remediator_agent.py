@@ -8,15 +8,103 @@ from typing import Optional
 import json
 import os
 import re
+import datetime
 from src.graph.state import AgentState
-from src.graph.routing import classify_blast_radius, requires_human_approval, DIAGNOSIS_CONFIDENCE
+from src.graph.routing import classify_blast_radius, requires_human_approval, DIAGNOSIS_CONFIDENCE, \
+    P99_LATENCY_WARNING, ERROR_RATE_WARNING, THROTTLE_RATE_HIGH
 from src.tools.sre_tool import notify_slack
+from src.tools import dispatcher
 
 
-#node: remediator
+def _preflight_enabled() -> bool:
+    """B5 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    return os.getenv("MULTI_AGENT", "0") == "1" or \
+        os.getenv("REMEDIATOR_PREFLIGHT_ENABLED", "0") == "1"
 
+
+REMEDIATOR_PREFLIGHT_QUERIES = 3
+_PREFLIGHT_EXPRS = [
+    ("error_rate",
+     'sum(rate(http_requests_total{{service="{service}",status_code=~"5.."}}[5m])) '
+     '/ sum(rate(http_requests_total{{service="{service}"}}[5m]))',
+     ERROR_RATE_WARNING),
+    ("p99_latency_s",
+     'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket'
+     '{{service="{service}"}}[5m])) by (le))',
+     P99_LATENCY_WARNING),
+    ("throttle_error_rate",
+     'sum(rate(http_requests_total{{service="{service}",status_code=~"429|504"}}[5m])) '
+     '/ sum(rate(http_requests_total{{service="{service}"}}[5m]))',
+     THROTTLE_RATE_HIGH),
+]
+
+
+def _preflight_validate(state: AgentState, action_plan: list) -> dict:
+    """bounded pre-flight <=3 read-only metric validations of the
+    plan's premise before committing it ('would restarting X drop error_rate?').
+
+    deterministic: if every queried premise signal is ALREADY healthy, the
+    action's premise is gone -> plan content unchanged but requires_approval
+    is forced so a human confirms before the (possibly stale) action runs.
+    """
+    service = (state.get("affected_services") or ["unknown"])[0]
+    calls, healthy_premise = [], True
+    for key, tmpl, threshold in _PREFLIGHT_EXPRS[:REMEDIATOR_PREFLIGHT_QUERIES]:
+        expr = tmpl.format(service=service)
+        out = dispatcher.run_tool("query_prometheus_metric", {"expr": expr})
+        ok = False
+        try:
+            ok = out is not None and not str(out).startswith("ERROR") \
+                and float(out) < threshold
+        except (TypeError, ValueError):
+            ok = False
+        healthy_premise = healthy_premise and ok
+        calls.append({"tool": "query_prometheus_metric", "args": {"expr": expr},
+                      "result": str(out)[:120], "signal": key, "within_threshold": ok,
+                      "ts": datetime.datetime.utcnow().isoformat(), "worker": "remediator-preflight"})
+        if len(calls) >= REMEDIATOR_PREFLIGHT_QUERIES:
+            break
+
+    ledger_note = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "from_worker": "remediator", "kind": "note",
+        "content": f"pre-flight validation: {len(calls)} query(ies), premise_still_valid="
+                   f"{not healthy_premise}",
+    }
+    out = {"tool_invocations": calls, "message_ledger": [ledger_note],
+           "budget": {"spent_iterations": 1}}
+    if healthy_premise and action_plan:
+        print("[remediator] pre-flight: premise already healthy — forcing human approval")
+        for a in action_plan:
+            a["requires_approval"] = True
+        out["requires_approval"] = True
+        out["action_plan"] = action_plan
+    return out
+
+
+def _maybe_preflight(state: AgentState, action_plan: list, needs_approval: bool) -> dict:
+    """run the bounded pre-flight mini-loop on NOVEL paths only
+    (diagnosis_mode == deep_agents); runbook/deterministic plans pass through
+    byteidentical."""
+    if not (_preflight_enabled() and state.get("diagnosis_mode") == "deep_agents"
+            and action_plan):
+        return {"action_plan": action_plan, "requires_approval": needs_approval}
+    out = _preflight_validate(state, action_plan)
+    if out.pop("requires_approval", None):
+        needs_approval = True
+    if "action_plan" in out:
+        action_plan = out.pop("action_plan")
+    return {**out, "action_plan": action_plan, "requires_approval": needs_approval}
+
+
+#remediator node
 def remediator_node(state: AgentState) -> dict:
     if state.get("action_plan"):
+        if _preflight_enabled() and state.get("diagnosis_mode") == "deep_agents":
+            out = _preflight_validate(state, state["action_plan"])
+            forced = out.pop("requires_approval", False)
+            out.pop("action_plan", None)  # plan dict mutated in place; state holds it
+            return out if (out or forced) else {}
         return {}
 
     # critic retry: rebuild the plan from the proposal the harness actually made.
@@ -30,11 +118,8 @@ def remediator_node(state: AgentState) -> dict:
             plan = _llm_extract_proposal(state)
         if plan:
             print(f"\n[remediator] Retry: rebuilt plan from investigation proposal ({plan[0]['tool']})")
-            return {
-                "action_plan": plan,
-                "requires_approval": any(a.get("requires_approval") for a in plan),
-                "requires_retry": False,
-            }
+            return {**_maybe_preflight(state, plan, any(a.get("requires_approval") for a in plan)),
+                    "requires_retry": False}
         
     print(f"\n[remediator] Building action plan for {state['incident_id']}")
 
@@ -101,13 +186,17 @@ def remediator_node(state: AgentState) -> dict:
     for a in action_plan:
         print(f"  -> {a['action'][:60]}  blast={a['blast_radius']} approval={a['requires_approval']}")
 
-    return {"action_plan": action_plan, "requires_approval": needs_approval}
+    return _maybe_preflight(state, action_plan, needs_approval)
 
 
 def _build_action_plan(runbook_id: str, state: AgentState) -> list:
     """load action plan from json."""
     raw = state.get("raw_signals", {})
-    plans_path = os.path.join(os.path.dirname(__file__), "..", "..", "runbooks", "runbooks.json")
+    # P10: the fintech pack can point at a different runbooks file
+    from src.config.loader import config_pack
+    pack_path = (config_pack().get("runbooks_path")
+                 or os.path.join("runbooks", "runbooks.json"))
+    plans_path = os.path.join(os.path.dirname(__file__), "..", "..", pack_path)
     
     try:
         with open(plans_path, "r") as f:
@@ -268,8 +357,8 @@ def repair_proposal_node(state: AgentState) -> dict:
         from langchain_core.messages import SystemMessage, HumanMessage
         from src.agents.utils import _get_llm
         from src.agents.schemas import RemediationProposal
-        llm = _get_llm(temperature=0.0, simple=True).with_structured_output(RemediationProposal)
-        resp = llm.invoke([
+        resp = _get_llm(temperature=0.0, simple=True).with_structured_output(
+            RemediationProposal, include_raw=False).invoke([
             SystemMessage(
                 content="You are repairing a remediation proposal the critic rejected. "
                 "Use only facts from the investigation scratchpad; satisfy the critic's "
@@ -362,9 +451,11 @@ def _llm_extract_proposal(state: AgentState) -> Optional[list]:
     scratchpad = "\n".join(str(e) for e in state.get("investigation_scratchpad", [])[-20:])
     critique = state.get("critique") or "no critique"
     try:
-        llm = _get_llm(temperature=0.0, simple=True).with_structured_output(RemediationProposal)  # P1-5: extraction is a simple node
-        # every LLM call must start with a system message (prompt-channel fix from trace INC-SLOBur-0F86)
-        resp = llm.invoke([
+        from src.agents.utils import _get_llm
+        from src.agents.schemas import RemediationProposal
+        resp = _get_llm(temperature=0.0, simple=True).with_structured_output(
+            RemediationProposal, include_raw=False).invoke([
+            # every LLM call must start with a system message (prompt-channel fix from trace INC-SLOBur-0F86)
             SystemMessage(content="Extract the remediation proposal from the investigation scratchpad. Return the tool call the investigator intended."),
             HumanMessage(content=f"CRITIC: {critique}\n\nSCRATCHPAD:\n{scratchpad}"),
         ])
