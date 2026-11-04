@@ -51,6 +51,28 @@ DEPENDENCIES = [
     ("account_ledger", "postgres_primary"),
     ("account_ledger", "postgres_replica"),
     ("notification_service", "account_ledger"),
+    # opentelemetry demo stack (sandbox regime) — real topology from the
+    # demo compose so KG-backed binding works against oteldemo incidents
+    ("frontend", "cart"),
+    ("frontend", "checkout"),
+    ("frontend", "ad"),
+    ("frontend", "currency"),
+    ("frontend", "product-catalog"),
+    ("frontend", "quote"),
+    ("frontend", "recommendation"),
+    ("frontend", "shipping"),
+    ("frontend", "email"),
+    ("checkout", "cart"),
+    ("checkout", "currency"),
+    ("checkout", "payment"),
+    ("checkout", "product-catalog"),
+    ("checkout", "quote"),
+    ("checkout", "shipping"),
+    ("checkout", "email"),
+    ("cart", "valkey-cart"),
+    ("cart", "feature-flag"),
+    ("payment", "kafka"),
+    ("recommendation", "product-catalog"),
 ]
 
 #public documentation for each service
@@ -293,7 +315,8 @@ class KGIngestor:
         for src, dst in DEPENDENCIES:
             session.run(
                 """
-                MATCH (a:Service {name: $src}), (b:Service {name: $dst})
+                MERGE (a:Service {name: $src})
+                MERGE (b:Service {name: $dst})
                 CREATE (a)-[:DEPENDS_ON]->(b)
                 """,
                 src=src, dst=dst,
