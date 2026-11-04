@@ -80,7 +80,6 @@ def _breaches(state) -> list:
         v = s.get(key)
         if v is not None and v >= thr:
             # name the source of the threshold: the alert's own annotation may cite a
-            # different value (INC-SLOBur-633F: alert fired at 1.0s, ours says 1.5s)
             out.append(f"{key}={v:.3f} above internal warning threshold {thr}")
     lp = s.get("log_patterns", {}) or {}
     if (lp.get("auth_failures") or 0) >= 50:
@@ -195,7 +194,8 @@ def deep_investigation_node(state) -> dict:
     raw = state.get("raw_signals", {})
     sig = "\n".join(
         f" {k}: {v}" for k, v in raw.items()
-        if v is not None and not k.endswith("summaries") and k != "log_patterns") or "none"
+        if v is not None and not k.endswith("summaries") and k != "log_patterns"
+        and not str(k).startswith("__")) or "none"
 
     error_logs = raw.get("error_log_summaries", [])[:6]
     error_text = "\n".join(error_logs)
