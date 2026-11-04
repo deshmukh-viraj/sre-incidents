@@ -1,6 +1,58 @@
 # Changelog
 
-All notable changes to SRE-MA. Dates are 2026-11-03.
+All notable changes to SRE-MA. Dates are 2026-11-03 (v2 integration) and 2026-11-04 (live validation).
+
+## [2026-11-04] — v2-refactor integration + live otel-demo validation (feature/v2-refactor)
+
+### Live validation (AWS otel-demo, real remediation)
+- End-to-end honest loop proven on the opentelemetry-demo stack: cartFailure
+  feature flag forced to the failure variant (`100%`), alert
+  `OTelUserFacingErrorRateHigh` fired with **no answer in it** (labels and
+  annotations neutralized), the agent investigated with its own bounded
+  ReAct sweep and **named the flag itself** from its evidence
+  (`feature_flag_evaluation_success_total{service_name="cart",
+  feature_flag_key="cartFailure"}` → `cartFailure → off`), executed through
+  the admin bridge on the instance, and the alert cleared — only because the
+  fix really worked. Result: `AGENT_REMEDIATED`, all five gates True,
+  MTTR business 231 s / agent 80 s, ~58 k tokens (~$0.03) per run.
+- Answer-removal: `remote_flag` / `remote_variant` labels stripped from the
+  alert; `propose_remediation(flag, variant)` + writeback → state → plan
+  params chain added so the executor reads the agent's proposal, not labels.
+- HITL proven both ways: an unverifiable-target proposal (KG down) routes to
+  human approval instead of a wrong rejection; approve/reject via
+  `/incidents/{id}/approve` resumes the graph through `Command(resume=...)`.
+
+### Added
+- `aws-admin/admin_server.py` — remote-flag bridge: validates flag/variant
+  against the demo's own schema over SSH, flips `demo.flagd.json`, reloads
+  flagd; unknown flags rejected. Backs the `set_feature_flag` tool.
+- `src/tools/log_tool.py` — OpenSearch logs backend (v2's `LOG_BACKEND=opensearch`
+  branch referenced a module that was never pushed; reconstructed).
+- `src/graph/budget.py` — v2's state-carried budget (P9 contract from
+  `tests/test_budget_fallback.py`), also missing at v2 HEAD.
+- Static topology fallback in `kg_tool.get_dependencies` (fintech + otel-demo
+  maps, same data `kg_ingest` seeds) so target binding and the critic's
+  dependency check work when Neo4j is unreachable.
+- Gate-2 binding is dependency-aware: an action on a declared dependency of
+  the alerted service binds to the affected system, recorded with
+  `target_bound_via` for the audit trail (gate math unchanged; an unrelated
+  service still fails to bind).
+- NVIDIA provider support: provider-tolerant `structured_invoke` in
+  `src/agents/utils.py` (ChatNVIDIA lacks `include_raw=True`), used by
+  communicator / diagnoser / verifier.
+- Golden tests regenerate over the agent-proposed flag/variant (9c2dd9e).
+
+### Fixed
+- v2 HEAD was not runnable as pushed: 3 committed conflict blocks in
+  `execution_agent.py` (syntax error), imports of two never-committed
+  modules, evaluator KeyError-ing every scenario, 6 silently-dropped service
+  aliases in `fintech.yaml` (misrouting), `requirements.txt` concatenation.
+- Remote flag verification: propagation grace 75 s (not the full alert-dilution
+  sleep — it inflated the gate-3 lead to the sleep duration) + gate-3
+  tolerance for remote flips = `REMOTE_FLAG_EFFECT_SECONDS` (300 s) +
+  overhead, covering the demo's trailing 5 m window dilution.
+- `check_alert_status` resolved-vs-unknown semantics.
+- 168 tests green (`pytest tests/ -q`).
 
 ## [unreleased] — hardening iteration (feature/deep-agent-refactor)
 
