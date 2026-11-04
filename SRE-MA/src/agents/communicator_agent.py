@@ -16,12 +16,35 @@ writes to state:
 
 import datetime
 import json
+import os
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from src.graph.state import AgentState
-from src.agents.utils import _get_llm, CommunicatorOutput, calculate_cost
+from src.agents.utils import _get_llm, calculate_cost
+from src.agents.schemas import CommunicatorOutput
 
 load_dotenv()
+
+
+def _comms_enabled() -> bool:
+    """ flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    return os.getenv("MULTI_AGENT", "0") == "1" or os.getenv("COMMS_ENABLED", "0") == "1"
+
+
+def _facts_block(state: AgentState) -> str:
+    """ authoritative execution facts (receipts + handoff decision) for the
+    agent-authored final report. Empty string when flag off or nothing to show."""
+    if not _comms_enabled():
+        return ""
+    parts = []
+    for r in state.get("receipts") or []:
+        outcome = "OK" if r.get("success") else "FAILED"
+        dry = " (dry-run)" if r.get("dry_run") else ""
+        parts.append(f"- {r.get('action')} via {r.get('tool')}: {outcome}{dry}")
+    pkg = state.get("handoff_to_human") or {}
+    if pkg.get("presented"):
+        parts.append(f"- Human handoff: cause={pkg.get('cause')}, decision={pkg.get('decision')}")
+    return "\n".join(parts)
 
 
 #node: communicator
@@ -33,7 +56,6 @@ def communicator_node(state: AgentState) -> dict:
     """
     print(f"\n[communicator] Generating communications for {state['incident_id']}")
 
-    llm = _get_llm(temperature=0.1, simple=True)  #comms are simple nodes
     severity = state.get("severity", "SEV3")
     alert = state.get("alert_name", "unknown_alert")
     services = ", ".join(state.get("affected_services", ["unknown"]))
@@ -66,6 +88,14 @@ def communicator_node(state: AgentState) -> dict:
 
     is_resolved = str(status).lower() in ("resolved", "action_failed")
 
+    #agent-authored final report grounded in receipts/handoff facts
+    facts = _facts_block(state)
+    facts_section = f"""
+- Execution facts (authoritative, from the agent ledger):\n{facts}
+""" if facts else ""
+    facts_guideline = ("- Execution facts: when present, the war_room_summary MUST include "
+                       "them verbatim in a 'Final report' section. Do not invent or contradict them.\n") if facts else ""
+
     prompt = f"""Generate 3 incident communications. Return ONLY JSON.
 
 Incident details:
@@ -78,7 +108,7 @@ Incident details:
 - Summary: {summary}
 - Root Cause: {root}
 - Current Status: {status}
-- Current Observed Metrics: {metrics_str}
+- Current Observed Metrics: {metrics_str}{facts_section}
 
 Return this exact JSON structure:
 {{
@@ -91,12 +121,12 @@ Guidelines:
 - Start time: Always use '{started_str}' when citing when the incident began. Do not use '{current_time_str}' as the start time.
 - Factual claims: Ground all recovery statements in the Current Observed Metrics. Do NOT overclaim recovery (e.g. do not say 'recovered to baseline' or 'throttling subsided' if metrics are still elevated above zero/baseline). Report observed numbers factually.
 - Escalation: If Current Status is '{status}' and resolved, 'escalation_message' MUST be null.
-"""
+{facts_guideline}"""
 
     try:
-        structured_llm = llm.with_structured_output(CommunicatorOutput, include_raw=True)
-        resp_dict = structured_llm.invoke([HumanMessage(content=prompt)])
-        resp, raw_msg = resp_dict["parsed"], resp_dict["raw"]
+        result = _get_llm(temperature=0.1, simple=True).with_structured_output(
+            CommunicatorOutput, include_raw=True).invoke([HumanMessage(content=prompt)])
+        resp, raw_msg = result["parsed"], result["raw"]
 
         usage = raw_msg.usage_metadata or raw_msg.response_metadata.get("token_usage", {})
         input_tokens = usage.get("input_tokens", 0)
@@ -116,10 +146,12 @@ Guidelines:
 
     except Exception as e:
         print(f"[communicator] ERROR: {e}")
+        fallback = f"[{severity}] {alert} — {summary}"
+        if facts:
+            fallback += f"\nFinal report:\n{facts}"
         return {
             "status_page_update": f"We are investigating an issue affecting {services}. Updates to follow.",
-            "war_room_summary": f"[{severity}] {alert} — {summary}",
-            #P1-4: never clobber the escalate node's message with None on our own failure
+            "war_room_summary": fallback,
             "escalation_message": None if is_resolved else state.get("escalation_message"),
             "errors":  state.get("errors", []) + [f"communicator failed: {str(e)}"],
         }
