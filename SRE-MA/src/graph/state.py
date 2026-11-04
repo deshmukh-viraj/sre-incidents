@@ -5,8 +5,30 @@ this is the only way they share data.
 """
 
 import os
-from typing import TypedDict, List, Optional, Dict, Any
+from typing import TypedDict, List, Optional, Dict, Any, Annotated
 from enum import Enum
+
+
+def _list_add(cur: Optional[List], new: Optional[List]) -> List:
+    """additive reducer: append instead of replace (message ledger merge)."""
+    return list(cur or []) + list(new or [])
+
+
+def _add_int(cur: Optional[int], new: Optional[int]) -> int:
+    return int(cur or 0) + int(new or 0)
+
+
+def _merge_budget(cur: Optional[Dict[str, Any]], new: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """budget merge: spent_* accumulate (monotone), max_* take the latest config."""
+    cur = dict(cur or {})
+    new = dict(new or {})
+    merged = {
+        "max_iterations_total": new.get("max_iterations_total", cur.get("max_iterations_total", 24)),
+        "max_tokens_total": new.get("max_tokens_total", cur.get("max_tokens_total", 400_000)),
+        "spent_iterations": int(cur.get("spent_iterations", 0) or 0) + int(new.get("spent_iterations", 0) or 0),
+        "spent_tokens": int(cur.get("spent_tokens", 0) or 0) + int(new.get("spent_tokens", 0) or 0),
+    }
+    return merged
 
 
 class Severity(str, Enum):
@@ -145,12 +167,12 @@ class AgentState(TypedDict, total=False):
     shadow_execution: bool
 
     #deep agent harness fields
-    investigation_scratchpad: List[str] 
-    investigation_steps: int 
-    investigation_complete: bool 
-    proposed_tool: Optional[str] 
-    proposed_target: Optional[str] 
-    proposed_blast_radius: Optional[str] 
+    investigation_scratchpad: List[str]
+    investigation_steps: int
+    investigation_complete: bool
+    proposed_tool: Optional[str]
+    proposed_target: Optional[str]
+    proposed_blast_radius: Optional[str]
     critique: Optional[str]
     diagnosis_issues: List[str]
     policy_rejections: List[str]
@@ -161,6 +183,24 @@ class AgentState(TypedDict, total=False):
     escalate_reason: Optional[str]   # agent_escalated | critic_rejected_after_retry | None
     repair_attempts: Optional[int]   # one-call repair hops used before a full re-investigation
     early_paged: bool                # SEV1 paged humans mid-ladder; escalate dedupes
+
+    # ---- multi-agent roster fields (R4/R5/R10) ----
+    # additive message ledger (merges, never overwrites; the structured layer over
+    # the raw investigation_scratchpad transcript, which keeps its replace semantics)
+    message_ledger: Annotated[List[Dict[str, Any]], _list_add]
+    ownership: Annotated[List[str], _list_add]        # ownership transfer trail
+    handoff_count: Annotated[int, _add_int]           # handoffs-to-human so far
+    budget: Annotated[Dict[str, Any], _merge_budget]  # R10: ONE global budget
+    budget_exhausted: bool
+    receipts: Annotated[List[Dict[str, Any]], _list_add]        # B6 ExecutionReceipt dicts
+    tool_invocations: Annotated[List[Dict[str, Any]], _list_add]  # R5 audit of tool calls
+    verifier_result: Optional[Dict[str, Any]]         # B1 VerificationChallenge dict
+    verifier_reroutes: Annotated[int, _add_int]       # cap-1 return-to-investigation counter
+    checker_result: Optional[Dict[str, Any]]          # B2 RecoveryChecker additional signal
+    handoff_to_human: Optional[Dict[str, Any]]        # B7 handoff package {reason, options, ...}
+    gate_version: Optional[str]                       # R5/R12: attribution gate version id
+    prompt_versions: Dict[str, str]                   # R5: worker -> prompt version
+    approval_notified: bool                           # dedupes the human_gate slack page on resume
 
 
 
@@ -262,5 +302,26 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         escalation_reason=[],
         escalate_reason=None,
         repair_attempts=0,
-        early_paged=False
+        early_paged=False,
+
+        #multi-agent roster fields (R4/R5/R10)
+        message_ledger=[],
+        ownership=[incident_id],
+        handoff_count=0,
+        budget={
+            "max_iterations_total": int(os.getenv("MAX_ITERATIONS_TOTAL", "24")),
+            "max_tokens_total": int(os.getenv("MAX_TOKENS_TOTAL", "400000")),
+            "spent_iterations": 0,
+            "spent_tokens": 0,
+        },
+        budget_exhausted=False,
+        receipts=[],
+        tool_invocations=[],
+        verifier_result=None,
+        verifier_reroutes=0,
+        checker_result=None,
+        handoff_to_human=None,
+        gate_version=os.getenv("GATE_VERSION", "gates-v1"),
+        prompt_versions={},
+        approval_notified=False,
     )
