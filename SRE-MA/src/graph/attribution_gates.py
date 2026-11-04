@@ -1,9 +1,7 @@
 """
 attribution_gates.py
-----------------------
-
+---------------------
 decides if the agent actually fix the issue, or if the system just healed itself.
-
 This file evaluates gate-3 (the temporal window) using the real recovery time
 (provided by cleae_time.py, which looks back at prometheus history)
 
@@ -11,7 +9,6 @@ This file evaluates gate-3 (the temporal window) using the real recovery time
 
 from dataclasses import dataclass
 from typing import Optional, Any
-
 from src.graph.clear_time import ClearEvidence
 
 AGENT_REMEDIATED = "AGENT_REMEDIATED"
@@ -116,7 +113,7 @@ def final_label(
     shadow_arm: bool = False
 ) -> str:
     """
-    Mashes all 5 gates together inot final incident label.
+    mashes all 5 gates together inot final incident label.
     if shadow_arm is true, it mean we faked the execution, so agent can never claim
     credit for fixing it, even if all other gates pass.
     """
