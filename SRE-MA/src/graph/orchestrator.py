@@ -4,15 +4,16 @@ from dotenv import load_dotenv
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
-from src.graph.state import AgentState
+from src.graph.state import AgentState, ResolutionStatus
 from src.agents.detector_agent import detector_node
 from src.agents.diagnoser_agent import diagnoser_node, llm_diagnoser
 from src.agents.remediator_agent import remediator_node, repair_proposal_node
 from src.agents.communicator_agent import communicator_node
 from src.agents.execution_agent import human_gate_node, execute_node
-from src.agents.escalation_agent import escalate_node
+from src.agents.escalation_agent import escalate_node, route_after_escalate
 from src.agents.deep_investigation import deep_investigation_node
 from src.agents.critic_agent import critic_node
+from src.agents.verifier_agent import verifier_node, route_after_verifier
 from src.graph.policy import policy_validator_node, route_after_policy, route_after_critic
 
 from src.graph.routing import (
@@ -40,15 +41,18 @@ def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     #register all nodes
+    #global Budget middleware wraps every reasoning worker
+    from src.graph.budget import budget_guard
     graph.add_node("detector", detector_node)
     graph.add_node("diagnoser", diagnoser_node)
-    graph.add_node("llm_diagnoser", llm_diagnoser)
+    graph.add_node("llm_diagnoser", budget_guard(llm_diagnoser))
     graph.add_node("deep_investigation", deep_investigation_node)
+    graph.add_node("verifier", budget_guard(verifier_node))
     graph.add_node("critic", critic_node)
     graph.add_node("repair_proposal", repair_proposal_node)
     graph.add_node("policy_validator", policy_validator_node)
-    graph.add_node("remediator", remediator_node)
-    graph.add_node("communicator", communicator_node)
+    graph.add_node("remediator", budget_guard(remediator_node))
+    graph.add_node("communicator", budget_guard(communicator_node))
     graph.add_node("human_gate", human_gate_node)
     graph.add_node("execute", execute_node)
     graph.add_node("escalate", escalate_node)
@@ -58,7 +62,11 @@ def build_graph() -> StateGraph:
     # detector -> diagnoser (always proceed to diagnosis to identify root cause)
     graph.add_edge("detector", "diagnoser")
 
-    # diagnoser -> route based on confidence
+    # diagnoser -> route based on confidence. NOTE: the "llm_diagnoser" route
+    # name is a lie-free contract here only in the table — for novel incidents
+    # it is deliberately redirected to the deep agent; llm_diagnoser (one-shot
+    # LLM) itself stays reachable only from route_after_investigation when the
+    # deep harness degrades (harness failure / budget exhausted -> pending_llm).
     graph.add_conditional_edges("diagnoser", route_after_diagnosis, {
             "remediator": "remediator",
             "llm_diagnoser": "deep_investigation",
@@ -66,8 +74,17 @@ def build_graph() -> StateGraph:
     })
     
     graph.add_conditional_edges("deep_investigation", route_after_investigation, {
-        "critic": "critic", 
+        "critic": "critic",
         "llm_diagnoser": "llm_diagnoser",
+        "verifier": "verifier",
+        "escalate": "escalate",
+    })
+
+    #verifier routing: contradicted+grounded -> deep_investigation (cap 1);
+    # everything else -> critic (pre-change target, fail-open)
+    graph.add_conditional_edges("verifier", route_after_verifier, {
+        "critic": "critic",
+        "deep_investigation": "deep_investigation",
     })
 
     # llm_diagnoser -> route based on confidence
@@ -98,8 +115,10 @@ def build_graph() -> StateGraph:
     })
 
     graph.add_conditional_edges("human_gate", route_after_human_gate, {
-        "execute": "execute", 
-        "escalate": "escalate", 
+        "execute": "execute",
+        "escalate": "escalate",
+        # natural calm: alert self-resolved during the pre-page soak — nothing to execute
+        "end_resolved": "communicator",
     })
     
     graph.add_conditional_edges("execute", route_after_verification, {
@@ -107,7 +126,12 @@ def build_graph() -> StateGraph:
         "escalate_execution": "escalate",
     })
 
-    graph.add_edge("escalate", "communicator")
+    #an un-presented handoff package lands in human_gate
+    #everything else keeps the pre-change escalate -> communicator edge
+    graph.add_conditional_edges("escalate", route_after_escalate, {
+        "communicator": "communicator",
+        "human_gate": "human_gate",
+    })
     graph.add_edge("communicator", END)
 
 
@@ -142,7 +166,7 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     from src.graph.state import initial_state
 
     state = initial_state(incident_id, raw_signals)
-    # get the langfuse handler
+    #get the langfuse handler
     handler = get_langfuse_handler(
         session_id=incident_id,
         alert_name=raw_signals.get("alert_name", "unknown"),
@@ -160,12 +184,34 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     print(f"{'='*60}")
 
     result = app.invoke(state, config=config)
+
+    #HITL: when the graph stopped at an interrupt() (human approval
+    #invoke returns the partial state — the run is PAUSED, not
+    # finished. report the interim picture instead of a completed resolution.
+    paused = bool(app.get_state(config).next)
+    if paused:
+        result["resolution_status"] = ResolutionStatus.WAITING_FOR_APPROVAL.value
+
     client = Langfuse()
     trace_id = client.get_current_trace_id() or get_trace_id(handler)
     if trace_id:
         result["trace_id"] = trace_id
 
-    # attach SRE metadata to the current span
+    if paused:
+        try:
+            trace_url = client.get_trace_url()
+            result["trace_url"] = trace_url
+            print(f"[langfuse] View trace in browser: {trace_url}")
+        except Exception as e:
+            print(f"[langfuse] trace url unavailable: {e}")
+        print(f"\n{'='*60}")
+        print(f"PAUSED: {incident_id} — awaiting human approval (approve/reject via /approve)")
+        print(f"Interim root cause: {result.get('root_cause') or 'under investigation'}")
+        print(f"Tokens: {result.get('total_tokens_used')} (${result.get('token_cost_usd', 0):.4f})")
+        print(f"{'='*60}\n")
+        return result
+
+    #attach SRE metadata to the current span
     scenario_name = raw_signals.get("scenario_name")
     tags = ["sre-agent", raw_signals.get("alert_name", "unknown")]
     if scenario_name:
@@ -185,7 +231,7 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     trace_url = client.get_trace_url()
     print(f"[Lanfusr] View trace in brower:{trace_url}")
     
-    # compute mttr use state value, or calculate from timestamps
+    #compute mttr use state value, or calculate from timestamps
     business_mttr = result.get('business_mttr_seconds')
     if business_mttr is None:
         started = result.get('alert_started_at')
@@ -219,11 +265,15 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
     print(f"RESOLVED: {incident_id}")
     print(f"Status: {result.get('resolution_status')}")
     print(f"Business MTTR: {b_mttr_display} | Agent MTTR: {a_mttr_display}")
-    print(f"Root cause: {result.get('root_cause', 'escalated')}")
-    print(f"Diagnosis Summary: {result.get('diagnosis_summary')}")
+    root_cause = result.get('root_cause') or 'escalated'
+    print(f"Root cause: {root_cause}")
+    
+    if result.get('diagnosis_summary') and result['diagnosis_summary'] != root_cause:
+        print(f"Diagnosis Summary: {result['diagnosis_summary']}")
+    if result.get('llm_suggested_action') and result['llm_suggested_action'] != root_cause:
+        print(f"Suggested Remediation: {result['llm_suggested_action']}")
     print(f"Evidence Summary: {result.get('evidence_summary')}")
     print(f"Blast Analysis: {result.get('blast_analysis')}")
-    print(f"Suggested Remediation: {result.get('llm_suggested_action')}")
     print(f"Tokens: {result.get('total_tokens_used')} (${result.get('token_cost_usd', 0):.4f})")
     print(f"{'='*60}\n")
 
