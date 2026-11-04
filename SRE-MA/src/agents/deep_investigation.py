@@ -173,6 +173,8 @@ def _structured_writeback(state, base_return, proposal, terminal, text_escalated
         "evidence_summary": "\n".join(ev_core),
         "llm_suggested_action": proposal.get("action") if proposal else None,
         "proposed_tool": proposal.get("tool") if proposal else None,
+        "proposed_flag": (proposal.get("flag") or None) if proposal else None,
+        "proposed_variant": (proposal.get("variant") or None) if proposal else None,
         "proposed_target": proposal.get("target_service") if proposal else None,
         "proposed_blast_radius": proposal.get("blast_radius") if proposal else None,
         "escalate_reason": "agent_escalated" if agent_escalated else None,

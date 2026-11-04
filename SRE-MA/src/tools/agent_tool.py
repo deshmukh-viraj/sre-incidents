@@ -268,7 +268,8 @@ def lookup_runbook_chunk(query: str) -> str:
         return f"runbook lookup failed: {e}"
 
 @tool
-def propose_remediation(action: str, tool: str, target_service: str, blast_radius: str) -> str:
+def propose_remediation(action: str, tool: str, target_service: str, blast_radius: str,
+                        flag: str = "", variant: str = "") -> str:
     """PROPOSE (never execute) a concrete remediation. This ENDS the investigation —
     call it once your diagnosis is complete, with the evidence-based finding in `action`.
 
@@ -285,12 +286,19 @@ def propose_remediation(action: str, tool: str, target_service: str, blast_radiu
         target_service: the service you are affecting — the alerted service itself or
             one of its DEPENDS_ON services (use query_topology to get the list).
         blast_radius: 'pod' | 'service' | 'cluster' (your honest estimate of impact scope).
+        flag: for set_feature_flag ONLY — the feature-flag key your evidence names
+            (e.g. from feature_flag_evaluation_success_total{feature_flag_key=...}).
+        variant: for set_feature_flag ONLY — the variant to restore (usually 'off').
 
     The proposal is validated by a critic (grounding + policy) before any execution.
     """
     if tool not in ALLOWED_WRITE_TOOLS:
         return (f"REJECTED: tool '{tool}' is not a valid remediation tool. "
                 f"Call propose_remediation again with tool set to one of: {sorted(ALLOWED_WRITE_TOOLS)}")
+    if tool == "set_feature_flag" and (not flag or not variant):
+        return ("REJECTED: set_feature_flag needs the flag key and the variant to restore, "
+                "named from your evidence (e.g. flag='cartFailure', variant='off'). "
+                "Look at feature_flag_evaluation_success_total labels or list_metrics before proposing.")
     return "proposal recorded, investigation ended."
 
 

@@ -132,7 +132,11 @@ def critic_node(state: AgentState) -> dict:
         blast = classify_blast_radius({"tool": tool, "params": {"service": tgt}})
         citations = [str(e)[6:160] for e in state.get("investigation_scratchpad", [])
                      if str(e).startswith("tool: ")][-3:]
-        action = {"action": act, "tool": tool, "params": {"service": tgt}, "blast_radius": blast,
+        params = {"service": tgt}
+        if tool == "set_feature_flag" and state.get("proposed_flag"):
+            params["flag"] = state["proposed_flag"]
+            params["variant"] = state.get("proposed_variant") or "off"
+        action = {"action": act, "tool": tool, "params": params, "blast_radius": blast,
                   "reversible": tool in REVERSIBLE_WRITE_TOOLS, "requires_approval": False,
                   "executed": False, "result": None}
         if citations:

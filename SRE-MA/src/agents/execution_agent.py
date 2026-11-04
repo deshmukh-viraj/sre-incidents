@@ -351,11 +351,10 @@ def execute_node(state: AgentState) -> dict:
         log_stage(incident_id, "EXECUTION", "SHADOW mode — suppressing execution")
 
     # remote (AWS OTel demo) remediation: the alert labels authorize the exact
-    # flag+variant, so override whatever the proposal carried and mark the
-    # action remote so sre_tool routes it to the aws-tunnel admin bridge.
-    raw_alarm = state.get("raw_signals") or {}
-    remote_flag_authorized = bool(raw_alarm.get("remote_flag"))
-
+    # remote flag remediation is authorized by the AGENT's proposal: the plan's
+    # params must carry flag+variant named from investigation evidence (the alert
+    # carries no answer). sre_tool routes set_feature_flag with remote=True to
+    # the admin bridge, which validates the flag/variant against demo.flagd.json.
     action_start_ts = datetime.datetime.utcnow()
     for action in action_plan:
         key = idem_key(state["incident_id"], action)
@@ -368,14 +367,8 @@ def execute_node(state: AgentState) -> dict:
             log_stage(incident_id, "EXECUTION", f"SHADOW: suppressing {action['action']}")
             result = {"success": True, "result": "shadow, no-op", "dry_run": True}
         else:
-            if action.get("tool") == "set_feature_flag" and remote_flag_authorized:
-                params = {
-                    **params,
-                    "flag": raw_alarm["remote_flag"],
-                    "variant": raw_alarm.get("remote_variant", params.get("variant", "off")),
-                    "remote": True,
-                }
-                action = {**action, "params": params}
+            if action.get("tool") == "set_feature_flag" and params.get("flag") and params.get("variant"):
+                params = {**params, "remote": True}
                 log_stage(incident_id, "REMOTE_EXECUTION", f"flag='{params['flag']}' -> variant='{params['variant']}'")
             result = execute_remediation(
                 action=action["action"],
@@ -440,8 +433,9 @@ def execute_node(state: AgentState) -> dict:
     )
     # remote OTLP demo: alert clearing waits on the 60s OTLP export cadence +
     # the rule's for-window, so remote flag flips get a longer generous budget
-    remote_flip = action_plan and remote_flag_authorized and any(
-        a.get("tool") == "set_feature_flag" for a in action_plan
+    remote_flip = action_plan and any(
+        a.get("tool") == "set_feature_flag" and a.get("params", {}).get("remote")
+        for a in action_plan
     )
     if remote_flip:
         grace_period = max(REMOTE_FLAG_EFFECT_SECONDS, grace_period)

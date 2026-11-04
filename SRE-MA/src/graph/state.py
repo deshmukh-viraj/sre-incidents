@@ -172,6 +172,8 @@ class AgentState(TypedDict, total=False):
     investigation_complete: bool
     proposed_tool: Optional[str]
     proposed_target: Optional[str]
+    proposed_flag: Optional[str]      # set_feature_flag proposals: flag key named by the agent
+    proposed_variant: Optional[str]   # and the variant to restore (usually 'off')
     proposed_blast_radius: Optional[str]
     critique: Optional[str]
     diagnosis_issues: List[str]
@@ -291,6 +293,8 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         investigation_complete=False,
         proposed_tool=None,
         proposed_target=None,
+        proposed_flag=None,
+        proposed_variant=None,
         proposed_blast_radius=None,
         critique=None,
         diagnosis_issues=[],

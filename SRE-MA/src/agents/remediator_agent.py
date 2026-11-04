@@ -338,11 +338,17 @@ def _item_from_state_fields(state: AgentState) -> Optional[list]:
     if not tool or not act or tool in ("escalate", "escalate_with_reason"):
         return None
     service = state.get("proposed_target") or (state.get("affected_services") or ["unknown"])[0]
-    blast = state.get("proposed_blast_radius") or classify_blast_radius({"tool": tool, "params": {"service": service}})
+    params = {"service": service}
+    # agent-named feature-flag remediation: the flag/variant come from the
+    # investigation (evidence labels), never from alert labels
+    if tool == "set_feature_flag" and state.get("proposed_flag"):
+        params["flag"] = state["proposed_flag"]
+        params["variant"] = state.get("proposed_variant") or "off"
+    blast = state.get("proposed_blast_radius") or classify_blast_radius({"tool": tool, "params": params})
     item = {
         "action": act,
         "tool": tool,
-        "params": {"service": service},
+        "params": params,
         "blast_radius": blast,
         "reversible": tool in REVERSIBLE_WRITE_TOOLS,
         "requires_approval": False,
