@@ -158,6 +158,14 @@ def log_incident_run(
 
         #log escalation class for all runs so resolved updates stale in-flight scores
         _score("escalation_class", escalation_class, "CATEGORICAL")
+
+        _score("gate_version", str(result.get("gate_version") or "gates-v1"), "CATEGORICAL")
+        for pv_key, pv_val in (result.get("prompt_versions") or {}).items():
+            _score(f"prompt_version_{pv_key}", str(pv_val), "CATEGORICAL")
+        _score("tool_invocations", float(len(result.get("tool_invocations") or [])), "NUMERIC")
+        _score("receipts", float(len(result.get("receipts") or [])), "NUMERIC")
+        _score("handoff_count", float(result.get("handoff_count") or 0), "NUMERIC")
+        _score("verifier_reroutes", float(result.get("verifier_reroutes") or 0), "NUMERIC")
             
         #log ground truth comparison — only when the scenario has a known oracle;
         # novel scenarios (no expected runbook) must not score a fake 0
