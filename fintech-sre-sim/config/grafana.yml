@@ -12,6 +12,15 @@ datasources:
         - name: trace_id
           datasourceUid: tempo
 
+  # AWS OpenTelemetry Demo Prometheus, fed through the reverse-tunnel container
+  - name: AWS-Prometheus
+    type: prometheus
+    access: proxy
+    editable: true
+    url: http://prom-tunnel:9090
+    jsonData:
+      timeInterval: "60s"
+
   - name: Loki
     type: loki
     access: proxy
