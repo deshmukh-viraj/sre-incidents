@@ -27,6 +27,23 @@ DIAGNOSIS_CONFIDENCE = 0.70    # below this -> LLM fallback
 MAX_DIAGNOSIS_LOOPS = 3       # prevent infinite re-diagnosis
 
 
+# P10 (TASK D): the fintech config pack can override the thresholds above
+# (flag CONFIG_PACK_ENABLED, default 0 — coded defaults stay active otherwise).
+def _apply_config_pack():
+    try:
+        from src.config.loader import config_pack
+        pack = config_pack() or {}
+        g = globals()
+        for key, value in (pack.get("thresholds") or {}).items():
+            if key in g and isinstance(value, (int, float)):
+                g[key] = type(g[key])(value)
+    except Exception as e:
+        print(f"[config-pack] threshold override failed: {e}")
+
+
+_apply_config_pack()
+
+
 #per action class temporal windows (gate 3)
 # a single hardcoded grace_period=30 for every action type, as exists today, is not defensible: 
 # a feature-flag flip and a full rollback do not propagate at the same speed
@@ -393,6 +410,11 @@ def route_after_diagnosis(
     diagnosis_mode = state.get("diagnosis_mode")
     loops = state.get("diagnosis_loops", 0)
 
+    # P9: budget middleware fired -> single escalation path (B7 handoff)
+    if state.get("budget_exhausted"):
+        print("[router] budget exhausted -> escalate")
+        return "escalate"
+
     # a passing hypothesis routes to remediation regardless of loop count:
     # failed attempts (e.g. a timed-out deep investigation) must not waste the
     # budget needed by the successful attempt that followed (INC-SLOBur-6DFF)
@@ -408,21 +430,30 @@ def route_after_diagnosis(
         # no hypothesis at all -> try LLM, unless we already tried or are about to
         if diagnosis_mode == "llm":
             return "escalate"
+        # NOTE: from the deterministic diagnoser this branch is deliberately wired
+        # to deep_investigation (orchestrator.py maps "llm_diagnoser" -> deep agent
+        # for novel-signal incidents); the one-shot llm_diagnoser node itself is
+        # only reached from route_after_investigation when the harness degrades.
+        print("[router] no hypothesis -> deep_investigation (novel signal, via llm_diagnoser route name)")
         return "llm_diagnoser"
 
     # confidence too low
     if diagnosis_mode == "llm":
         return "escalate"
+    print(f"[router] max confidence < {DIAGNOSIS_CONFIDENCE:.2f} -> deep_investigation")
     return "llm_diagnoser"
 
 
 #check if approval is needed
 def route_after_remediator(
     state: AgentState,
-) -> Literal["human_gate", "execute"]:
+) -> Literal["human_gate", "execute", "escalate"]:
     """
+    P9: budget-exhausted mid-remediation -> escalate (B7 handoff).
     human ke pass jana, otherwise execute immediately.
     """
+    if state.get("budget_exhausted"):
+        return "escalate"
     if state.get("requires_approval"):
         return "human_gate"
     return "execute"
@@ -439,17 +470,31 @@ def route_after_verification(state: AgentState) -> Literal["end_resolved", "esca
         return "escalate_execution"
 
 
-def route_after_investigation(state) -> Literal["critic", "llm_diagnoser"]:
+def route_after_investigation(state) -> Literal["critic", "llm_diagnoser", "verifier", "escalate"]:
     """harness failure (diagnosisi_mode == 'pending_llm') degrades to legacy on shot"""
+    # P9: budget-exhausted before more LLM work -> escalate (B7 handoff)
+    if state.get("budget_exhausted"):
+        print("[router] budget exhausted -> escalate")
+        return "escalate"
     if state.get("diagnosis_mode") == "pending_llm":
         print(f"[router] deep_investigation -> llm_diagnoser (pending_llm)")
         return "llm_diagnoser"
+    # B1 Verifier (flag-gated): adversarial check between investigation and critic;
+    # fail-open default keeps the pre-change target.
+    from src.agents.verifier_agent import verifier_enabled
+    if verifier_enabled(state):
+        print("[router] deep_investigation -> verifier (VERIFIER_ENABLED)")
+        return "verifier"
     print(f"[router] deep_investigation -> critic (mode={state.get('diagnosis_mode')})")
     return "critic"
 
 
-def route_after_human_gate(state):
-    """fix: a denied approval must NEVER reach the executor"""
+def route_after_human_gate(state: AgentState) -> Literal["execute", "escalate", "end_resolved"]:
+    """fix: a denied approval must NEVER reach the executor.
+    natural_calm: live signals recovered before the page — nothing to execute,
+    close via the final communicator instead."""
+    if state.get("natural_calm"):
+        return "end_resolved"
     return "execute" if state.get("human_approved") else "escalate"
 
         
@@ -501,23 +546,31 @@ def requires_human_approval(action: dict) -> bool:
 
 
 #infer service name
+_DEFAULT_SERVICE_ALIASES = {
+    "PaymentGateway": "payment_gateway",
+    "SLOError": "payment_gateway",
+    "SLOBudget": "payment_gateway",
+    "PaymentDecline": "payment_gateway",
+    "PaymentTransaction": "payment_gateway",
+    "CircuitBreaker": "payment_gateway",
+    "DBConnection": "account_ledger",
+    "SlowQuery": "account_ledger",
+    "Ledger": "account_ledger",
+    "ServiceMemory": "account_ledger",
+    "Anomalous": "api_gateway",
+    "Authentication": "api_gateway",
+    "Compliance": "api_gateway",
+    "FraudModel": "fraud_detector",
+}
+
+
 def infer_service(alert_name: str) -> str:
-    mapping = {
-        "PaymentGateway": "payment_gateway",
-        "SLOError": "payment_gateway",
-        "SLOBudget": "payment_gateway",
-        "PaymentDecline": "payment_gateway",
-        "PaymentTransaction": "payment_gateway",
-        "CircuitBreaker": "payment_gateway",
-        "DBConnection": "account_ledger",
-        "SlowQuery": "account_ledger",
-        "Ledger": "account_ledger",
-        "ServiceMemory": "account_ledger",
-        "Anomalous": "api_gateway",
-        "Authentication": "api_gateway",
-        "Compliance": "api_gateway",
-        "FraudModel": "fraud_detector",
-    }
+    # P10: the fintech pack's service_aliases override the coded map
+    try:
+        from src.config.loader import config_pack
+        mapping = (config_pack().get("service_aliases") or _DEFAULT_SERVICE_ALIASES)
+    except Exception:
+        mapping = _DEFAULT_SERVICE_ALIASES
     for keyword, svc in mapping.items():
         if keyword.lower() in alert_name.lower():
             return svc
