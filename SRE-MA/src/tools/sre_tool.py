@@ -14,6 +14,7 @@ from src.tools.loki_tool import (
     detect_patterns,
     extract_log_summary,
 )
+from src.tools.backends.registry import get_backend
 
 load_dotenv()
 
@@ -41,10 +42,6 @@ def collect_all_signals(service: str) -> Dict[str, Any]:
     #prometheus metrics
     signals = collect_incident_signals(service)
 
-    #logs: backend chosen by LOG_BACKEND env. opensearch fetches the AWS
-    #otel-demo's logs via the tunnel and applies the honest query_logs contract
-    #(top patterns, <=200 lines, 'signal unavailable' on failure). The default
-    #loki path keeps the original fintech-only queries unchanged.
     if os.getenv("LOG_BACKEND", "loki") == "opensearch":
         from src.tools.log_tool import query_logs
         log_result = query_logs(service)
@@ -64,10 +61,14 @@ def collect_all_signals(service: str) -> Dict[str, Any]:
               f"patterns={len(signals['log_top_patterns'])}")
         return signals
 
-    #loki logs
-    error_logs = query_loki(f'{{service="{service}"}} | json | level="ERROR"', limit=20)
-    sec_logs = query_loki('{service="api_gateway"} | json | audit_required="true"', lookback_minutes=10)
-    slow_logs = query_loki('{service="db_proxy"} | json | alert="SLOW_QUERY"', limit=30, lookback_minutes=10)
+    #loki logs — pre-built queries owned by the logs adapter
+    logs = get_backend("logs")
+    if logs is not None:
+        error_logs = logs.log_capability("service_errors", service=service, limit=20)
+        sec_logs = logs.log_capability("audit_events", lookback_minutes=10)
+        slow_logs = logs.log_capability("slow_queries", limit=30, lookback_minutes=10)
+    else:
+        error_logs, sec_logs, slow_logs = [], [], []
     
     all_logs = error_logs + sec_logs + slow_logs
 

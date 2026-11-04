@@ -30,6 +30,23 @@ HANDOFF_OPTIONS = [
 ]
 
 
+def _evidence_package(state: AgentState, cap: int = 4) -> str:
+    """the investigative artifacts a human handoff must carry: actual tool
+    results the agent collected, plus the diagnosed issues. empty -> ''."""
+    tool_results = [
+        str(e)[6:140]
+        for e in state.get("investigation_scratchpad", [])
+        if str(e).startswith("tool: ")
+    ][-cap:]
+    issues = state.get("diagnosis_issues") or []
+    lines = []
+    if tool_results:
+        lines.append("Investigation evidence (tool results):\n  - " + "\n  - ".join(tool_results))
+    if issues:
+        lines.append("Diagnosis issues: " + "; ".join(str(i) for i in issues[:3]))
+    return ("\n" + "\n".join(lines)) if lines else ""
+
+
 def _handoff_enabled() -> bool:
     """B7 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
@@ -74,14 +91,17 @@ def escalate_node(state: AgentState) -> dict:
     if state.get('diagnosis_mode') == "llm" and state.get("diagnosis_loops", 0):
         reason = "DIAGNOSIS_EXHAUSTED"
         hypotheses = state.get("hypotheses", [])
-        best_guess = hypotheses[0].get("hypothesis", "Unknown") if hypotheses else "Unknown"
+        # best = max confidence, not first written — the handoff cites the strongest theory
+        best = max(hypotheses, key=lambda h: h.get("confidence", 0)) if hypotheses else None
+        best_guess = (best or {}).get("hypothesis", "Unknown") if hypotheses else "Unknown"
         max_conf = max((h.get("confidence", 0) for h in hypotheses), default=0)
-        
+
         message = (
             f" *AI diagnosis failed*\n"
             f"Incident: '{incident_id}' | Severity: {severity}\n"
             f"Alert: '{alert_name}'\n"
             f"Best Guess: {best_guess} (Conf: {max_conf:.0%})\n"
+            f"{_evidence_package(state)}\n"
             f"Action Required: Manual root cause analysis needed"
         )
     
@@ -103,7 +123,8 @@ def escalate_node(state: AgentState) -> dict:
         #escalate with the actual finding, proposed action, and policy rejections  never a bare generic line
         reason = "UNKNOWN"
         hypotheses = state.get("hypotheses", [])
-        best_guess = (state.get("root_cause") or (hypotheses[0].get("hypothesis") if hypotheses else None)) or "no diagnosis reached"
+        best = max(hypotheses, key=lambda h: h.get("confidence", 0)) if hypotheses else None
+        best_guess = (state.get("root_cause") or (best or {}).get("hypothesis")) or "no diagnosis reached"
         llm_action = state.get("llm_suggested_action")
         rejections = state.get("policy_rejections") or []
 
@@ -114,6 +135,7 @@ def escalate_node(state: AgentState) -> dict:
             f"Finding: {best_guess}\n"
             + (f"Proposed Action: {llm_action}\n" if llm_action else "")
             + (f"Policy Rejections: {'; '.join(str(r.get('reason', r)) for r in rejections)}\n" if rejections else "")
+            + f"{_evidence_package(state)}\n"
             + f"Action Required: Manual root cause analysis needed"
         )
 

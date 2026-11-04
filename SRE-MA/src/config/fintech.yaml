@@ -25,6 +25,13 @@ service_aliases:            # alert_name -> service (infer_service map)
   PaymentTransaction: payment_gateway
   CircuitBreaker: payment_gateway
   DBConnection: account_ledger
+  SlowQuery: account_ledger
+  Ledger: account_ledger
+  ServiceMemory: account_ledger
+  Anomalous: api_gateway
+  Authentication: api_gateway
+  Compliance: api_gateway
+  FraudModel: fraud_detector
 
 gateway_services:           # services that get payment/fraud metric queries
   - payment_gateway

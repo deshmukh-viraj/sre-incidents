@@ -118,6 +118,7 @@ class ComponentStatus(BaseModel):
     faiss_index: str
     neo4j_kg: str
     prometheus: str
+    traces: str = "disabled"
 
 
 class IncidentStats(BaseModel):

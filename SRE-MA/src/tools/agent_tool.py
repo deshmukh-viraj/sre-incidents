@@ -7,11 +7,14 @@ sandboxed tool set for the DeepAgent/ReAct investigation harness.
 
 import json
 import re
+import threading
 import urllib.request
 import os
 from langchain_core.tools import tool
-from src.tools.prometheus_tool import _instant_query
+from src.tools.prometheus_tool import _instant_query, prometheus_url
+from src.tools.loki_tool import extract_log_summary
 from src.tools.log_tool import query_logs
+from src.tools.backends.registry import get_backend
 from src.tools.kg_tool import (
     query_knowledge_graph,
     query_recent_resolved_incident,
@@ -64,8 +67,34 @@ METRIC_CATALOG = {
 # merge in the remote-demo families so validate_expr accepts them too
 METRIC_CATALOG.update(OTEL_DEMO_CATALOG)
 
-def validate_expr(expr: str) -> tuple[bool, str]:
-    """Validate PromQL expression. Returns (is_valid, error_message)."""
+#per-investigation duplicate-read cache: an identical read query inside one
+#investigation returns the recorded result instead of re-hitting the backend.
+#deep_investigation resets it per run; outside a run the cache is inert.
+_investigation_cache = threading.local()
+
+
+def reset_investigation_cache():
+    _investigation_cache.results = {}
+
+
+def _cached_read(key: str, run):
+    cache = getattr(_investigation_cache, "results", None)
+    if cache is None:
+        return run()
+    if key in cache:
+        print(f"[tool-cache] DUPLICATE read suppressed: {key[:80]}")
+        return (f"[DUPLICATE] You already ran this exact query in this investigation. "
+                f"Recorded result: {str(cache[key])[:180]} — move to a different hypothesis.")
+    result = run()
+    cache[key] = result
+    return result
+
+
+def validate_expr(expr: str, check_catalog: bool = True) -> tuple[bool, str]:
+    """Validate PromQL expression. Returns (is_valid, error_message).
+    check_catalog=False skips the metric-membership check (syntax only) — used
+    by the verifier, where unknown metrics are honest no-data results and the
+    read-only dispatcher is the enforcement point."""
     #check balanced brackets
     brackets = {'(': ')', '[': ']', '{': '}'}
     stack = []
@@ -89,8 +118,8 @@ def validate_expr(expr: str) -> tuple[bool, str]:
         if '[' not in inner or ']' not in inner:
             return False, f"{call} missing range selector (e.g., [5m])"
     
-    #check metric exists in catalog
-    if not any(m in expr for m in METRIC_CATALOG):
+    #check metric exists in catalog (skippable for the verifier's syntax-only pass)
+    if check_catalog and not any(m in expr for m in METRIC_CATALOG):
         return False, f"Unknown metric. Allowed: {list(METRIC_CATALOG.keys())}"
     
     return True, ""
@@ -117,7 +146,7 @@ def query_prometheus_metric(expr: str) -> str:
     if not valid:
         return f"ERROR: {err}. Allowed metrics: {list(METRIC_CATALOG.keys())}. Convention: generic names + labels (e.g. db='postgres_primary'). Never use service prefixes."
     try:
-        val = _instant_query(expr)
+        val = _cached_read(f"metric:{expr}", lambda: _instant_query(expr))
         if val is None:
             return f"ERROR: Query '{expr}' returned no data. Use exact metric from list_metrics and verify labels (e.g. db='postgres_primary', not service=)."
         return f"{val}"
@@ -152,13 +181,15 @@ def query_service_logs(service: str, start: str = "", end: str = "", text: str =
         if m:
             svc = m.group(1)
     try:
-        res = query_logs(
-            svc,
-            start=start or None,
-            end=end or None,
-            text=text or None,
-            level=level or None,
-        )
+        def _run():
+            return query_logs(
+                svc,
+                start=start or None,
+                end=end or None,
+                text=text or None,
+                level=level or None,
+            )
+        res = _cached_read(f"logs:{svc}:{start}:{end}:{text}:{level}", _run)
     except Exception as e:
         return f"signal unavailable: log backend error: {e}"
     if not res.get("available"):
@@ -185,7 +216,7 @@ def query_topology(service: str) -> str:
     Only fall back to list_metrics when a topology query returns empty or errors.
     """
     try:
-        return query_knowledge_graph([service], "")
+        return _cached_read(f"topology:{service}", lambda: query_knowledge_graph([service], ""))
     except Exception as e:
         return f"kg query failes: {e}"
 
@@ -202,10 +233,12 @@ def list_metrics(service: str) -> str:
     Returns 'no curated queries for <service>' for services that are not scraped.
     """
     try:
-        url = f"{PROMETHEUS_URL}/api/v1/label/__name__/values"
-        with urllib.request.urlopen(url, timeout=5.0) as resp:
-            names = json.loads(resp.read().decode()).get("data", [])
-        live = [n for n in names if n.startswith(_APP_METRIC_PREFIXES)]
+        def _run():
+            metrics = get_backend("metrics")
+            names = metrics.metric_names(prefixes=_APP_METRIC_PREFIXES) if metrics else None
+            live = names if names is not None else None
+            return live
+        live = _cached_read(f"list_metrics:{service}", _run)
     except Exception:
         live = None  # fall through to verified static map
 

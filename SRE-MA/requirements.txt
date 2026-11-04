@@ -22,3 +22,4 @@ langchain-openai
 langchain-core
 tenacity
 langchain-nvidia-ai-endpoints
+pytest

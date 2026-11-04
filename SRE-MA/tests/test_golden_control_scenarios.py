@@ -7,6 +7,7 @@ byte-identical for the three control scenarios.
 Regenerate with:  UPDATE_GOLDEN=1 ./mango/Scripts/python.exe -m pytest tests/test_golden_control_scenarios.py -q
 """
 import json
+import re
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -221,15 +222,25 @@ def _capture_scenario(name, monkeypatch):
         "deterministic_diagnosis": det,
         "routes": routes,
         "policy_output": pol_out,
-        "llm_diagnoser_prompts": prompt_capture,
+        "llm_diagnoser_prompts": [_sanitize(c) for c in prompt_capture],
         "llm_diagnoser_delta": {k: v for k, v in llm_delta.items() if k != "hypotheses"},
         "llm_diagnoser_hypotheses": llm_delta.get("hypotheses"),
-        "deep_investigation_prompts": deep_capture,
+        "deep_investigation_prompts": [_sanitize(c) for c in deep_capture],
         "deep_investigation_delta": {
             k: v for k, v in deep_delta.items()
             if k not in ("hypotheses",) and k != "investigation_scratchpad"
         } | {"scratchpad_len": len(deep_delta.get("investigation_scratchpad", []))},
     }
+
+
+def _sanitize(text: str) -> str:
+    """strip machine-specific transport noise (neo4j/socket error tracebacks)
+    from captured prompts so the golden file is portable across environments."""
+    text = re.sub(
+        r"Failed to establish connection to ResolvedIPv[46]Address\([^)]*\)[^\\\"]*",
+        "[kg-transport-error]", text)
+    text = re.sub(r"Failed to resolve '[^']*'", "[dns-resolve-error]", text)
+    return text
 
 
 def _dump(obj) -> str:

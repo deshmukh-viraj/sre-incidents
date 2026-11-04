@@ -147,7 +147,7 @@ def test_verifier_uses_read_only_dispatcher(monkeypatch):
         return orig(name, args, **kw)
 
     monkeypatch.setattr(verifier_agent.dispatcher, "run_tool", spy)
-    challenge = VerificationChallenge(claim="c", disproof_queries=["x"],
+    challenge = VerificationChallenge(claim="c", disproof_queries=["http_requests_total"],
                                       verdict="upheld", confidence=0.8)
     _fake_llm(monkeypatch, challenge, challenge)
     verifier_node(_state())

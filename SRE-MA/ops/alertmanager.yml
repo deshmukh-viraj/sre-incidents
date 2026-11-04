@@ -1,0 +1,17 @@
+global:
+  resolve_timeout: 1m
+
+route:
+  receiver: sre-agent
+  group_by: [alertname, service]
+  group_wait: 0s
+  group_interval: 30s
+  repeat_interval: 4h
+
+receivers:
+  - name: sre-agent
+    webhook_configs:
+      # the SRE-MA agent API (uvicorn) on this box; send_resolved so the
+      # attribution engine sees real recovery, not agent-side polling only
+      - url: http://localhost:8080/webhook/alert
+        send_resolved: true

@@ -39,27 +39,16 @@ except ImportError:
         return decorator
 
 
-<<<<<<< Updated upstream
 def _recovery_checker_enabled() -> bool:
     """B2 RecoveryChecker flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("RECOVERY_CHECKER_ENABLED", "0") == "1"
-=======
+
+
 def log_stage(incident_id: str, stage: str, detail: str = ""):
     """clean stage logger for real-time visibility."""
     suffix = f" | {detail}" if detail else ""
     print(f"\n[{incident_id}] ▶ {stage}{suffix}")
-
-
-@dataclass
-class VerificationResult:
-    verified: bool
-    p99_latency_s: Optional[float] = None
-    error_rate: Optional[float] = None
-    t_clear: Optional[str] = None
-    signal: Optional[str] = None
-    healthy_run_len: int = 0 
->>>>>>> Stashed changes
 
 
 def _executor_receipts_enabled() -> bool:
@@ -118,7 +107,6 @@ def human_gate_node(state: AgentState) -> dict:
         log_stage(incident_id, "HUMAN_GATE", f"auto-approved (requires_approval={needs_approval})")
         return {"human_approved": True, "approval_timeout": False}
 
-<<<<<<< Updated upstream
     # natural-calm soak (INC-Paymen-9023): a transient spike can recover while the
     # pipeline investigates; paging a human for an alert that already calmed is a
     # false page. SEV2/SEV3 only (SEV1 pages immediately), fresh live signals,
@@ -154,10 +142,7 @@ def human_gate_node(state: AgentState) -> dict:
             time.sleep(min(20, max(1, deadline - time.time())))
 
     # llm /destructive (requires approval)
-    print(f"[human_gate] Interrupting graph for {incident_id} awaiting for human approval...")
-=======
     log_stage(incident_id, "HUMAN_GATE", f"waiting for approval (requires_approval={needs_approval})")
->>>>>>> Stashed changes
 
     actions_text = ""
     for a in state.get("action_plan", []):
@@ -171,8 +156,7 @@ def human_gate_node(state: AgentState) -> dict:
         "question": "Do you approve the action plan?",
         "incident_id": incident_id
     })
-<<<<<<< Updated upstream
-    print(f"[human gate] Resumed {incident_id} with human input: {human_decsion}")
+    log_stage(incident_id, "HUMAN_GATE", f"resumed with input: {human_decsion.get('approved', False)}")
     message = (
         f" *Approval decision for {incident_id}*\n"
         f"*Alert*: {state.get('alert_name', 'Unknown')}\n"
@@ -182,9 +166,6 @@ def human_gate_node(state: AgentState) -> dict:
         f" by {human_decsion.get('approver', 'system')}\n"
     )
     notify_slack(message=message, channel="incidents", severity="warning", incident_id=incident_id)
-=======
-    log_stage(incident_id, "HUMAN_GATE", f"resumed with input: {human_decsion.get('approved', False)}")
->>>>>>> Stashed changes
     return {
         "human_approved": human_decsion.get("approved", False),
         "approved_by": human_decsion.get("approver", "system"),
@@ -310,20 +291,21 @@ def _verify_recovery(
     )
 def _signal_expr(service: str, signal: Optional[str]) -> tuple[str, float, str]:
     """
-    maps the verification signal (which metric actually recovered) to the prometheus expression
-    threshold, comparison that gates3's range query needs to ask the same questiion against real history
+    maps the verification signal (which metric actually recovered) to the metric
+    expression, threshold, comparison that gate3's range query needs to ask the
+    same question against real history. expressions come from the metrics adapter
+    template registry — no dialect is authored in this node.
     """
+    from src.tools.backends.registry import get_backend
+
+    metrics = get_backend("metrics")
+    if metrics is None:
+        raise RuntimeError("metrics backend disabled in this environment pack")
     if signal == "error_rate":
-        expr = (
-            f'sum(rate(http_requests_total{{service="{service}", status_code=~"5.."}}[1m])) '
-            f'/ sum(rate(http_requests_total{{service="{service}"}}[1m]))'
-        )
+        expr = metrics.template("error_rate", service=service, window="1m")
         return expr, ERROR_RATE_WARNING, "below"
-    
-    expr = (
-        f'histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket'
-        f'{{service="{service}"}}[1m])) by (le))'
-    )
+
+    expr = metrics.template("p99_latency", service=service, window="1m")
     return expr, P99_LATENCY_RECOVERY, "below"
 
 

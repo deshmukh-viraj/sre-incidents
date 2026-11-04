@@ -14,7 +14,10 @@ from langgraph.prebuilt import create_react_agent
 
 import re
 from src.agents.utils import _get_llm, calculate_cost, _accumulate_usage
-from src.tools.agent_tool import ALL_TOOLS, READ_TOOLS, propose_remediation, escalate_with_reason
+from src.tools.agent_tool import (
+    ALL_TOOLS, READ_TOOLS, propose_remediation, escalate_with_reason,
+    reset_investigation_cache,
+)
 from src.tools.kg_tool import SERVICE_METRICS
 from src.graph.routing import (
     P99_LATENCY_WARNING, ERROR_RATE_WARNING, THROTTLE_RATE_HIGH,
@@ -189,6 +192,7 @@ def deep_investigation_node(state) -> dict:
     print(f"[deep_investigation] Alert: {state.get('alert_name')} | Severity: {state.get('severity')}")
     print(f"[deep_investigation] Services: {state.get('affected_services')}")
 
+    reset_investigation_cache()
     tool_call_cache = {}
 
     raw = state.get("raw_signals", {})
@@ -260,6 +264,22 @@ def deep_investigation_node(state) -> dict:
 
     msgs = result["messages"]
 
+    # duplicate-call accounting — hoisted before the forced finalizer so the
+    # stagnation signal can gate what happens when the agent never concludes
+    tool_call_in_response = [tc for m in msgs for tc in (getattr(m, "tool_calls", None) or [])]
+    fresh_calls = []
+    for tc in tool_call_in_response:
+        key = _cache_key(tc['name'], tc.get('args', {}))
+        if key in tool_call_cache:
+            print(f"[deep_investigation] DUPLICATE TOOL CALL HAPPENED: {tc['name']}")
+        else:
+            tool_call_cache[key] = True
+            fresh_calls.append(tc)
+
+    stagnant = len(tool_call_in_response) > 0 and len(fresh_calls) == 0
+    if stagnant:
+        print(f"[deep_investigation] STAGNATION: all {len(tool_call_in_response)} tool calls were duplicates")
+
     #forced finalization, one retry with an explicit "output now" nudge before giving up
     terminal = next((tc for m in msgs for tc in (getattr(m, "tool_calls", None) or []) if tc['name'] in ("propose_remediation", "escalate_with_reason")), None)
     if terminal is None:
@@ -286,7 +306,9 @@ def deep_investigation_node(state) -> dict:
         fixes = re.findall(r'-\s*(.*?)\s*\(success_rate=(\d+)%', top_text)
         keywords = [w for w in re.findall(r'\w+', f"{state.get('alert_name', '')} {' '.join(_breaches(state))}".lower()) if len(w) > 3]
         relevant = [(fix, int(rate)/100.0) for fix, rate in fixes if any(k in fix.lower() for k in keywords)]
-        if relevant:
+        # acting on a canned fix needs fresh evidence: fewer distinct queries than
+        # STAGNATION_THRESHOLD means the loop went in circles — escalate instead
+        if relevant and len(fresh_calls) >= STAGNATION_THRESHOLD:
             best_fix, rate = max(relevant, key=lambda x: x[1])
             tool = "rollback_deployment" if "rollback" in best_fix.lower() else ("set_feature_flag" if "flag" in best_fix.lower() else "rolling_restart")
             blast = classify_blast_radius({"tool": tool, "params": {"service": primary_service}})
@@ -306,21 +328,6 @@ def deep_investigation_node(state) -> dict:
     model_name = next((getattr(m, "response_metadata", {}).get("model_name") or getattr(m, "response_metadata", {}).get("model") for m in reversed(msgs) if getattr(m, "response_metadata", None)), None)
     input_tokens, output_tokens = _accumulate_usage(msgs)
     cost = calculate_cost(input_tokens, output_tokens, model_name)
-
-    # detect stagnation: all tool calls in this run were cache hits
-    tool_call_in_response = [tc for m in msgs for tc in (getattr(m, "tool_calls", None) or [])]
-    fresh_calls = []
-    for tc in tool_call_in_response:
-        key = _cache_key(tc['name'], tc.get('args', {}))
-        if key in tool_call_cache:
-            print(f"[deep_investigation] DUPLICATE TOOL CALL HAPPENED: {tc['name']}")
-        else:
-            tool_call_cache[key] = True
-            fresh_calls.append(tc)
-
-    stagnant = len(tool_call_in_response) > 0 and len(fresh_calls) == 0
-    if stagnant:
-        print(f"[deep_investigation] STAGNATION: all {len(tool_call_in_response)} tool calls were duplicates")
 
     base_return = {
         "investigation_scratchpad": [

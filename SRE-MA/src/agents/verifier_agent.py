@@ -123,8 +123,10 @@ def verifier_node(state: AgentState) -> dict:
 
         results, executed = [], 0
         for expr in (challenge.disproof_queries or [])[:VERIFIER_MAX_DISPROOF_QUERIES]:
-            # static pre-check: reject non-catalog/broken PromQL before the round trip
-            valid, why = validate_expr(expr)
+            # static pre-check: reject broken PromQL before the round trip; the
+            # catalog check stays off here — unknown metrics are honest no-data
+            # results, and the read-only dispatcher is the enforcement point
+            valid, why = validate_expr(expr, check_catalog=False)
             if not valid:
                 invocations.append({"tool": "query_prometheus_metric", "args": {"expr": expr},
                                     "result": f"SKIP: {why}",

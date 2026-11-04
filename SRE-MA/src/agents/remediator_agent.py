@@ -12,6 +12,7 @@ import datetime
 from src.graph.state import AgentState
 from src.graph.routing import classify_blast_radius, requires_human_approval, DIAGNOSIS_CONFIDENCE, \
     P99_LATENCY_WARNING, ERROR_RATE_WARNING, THROTTLE_RATE_HIGH
+from src.graph.policy import REVERSIBLE_WRITE_TOOLS
 from src.tools.sre_tool import notify_slack
 from src.tools import dispatcher
 
@@ -20,7 +21,6 @@ def _preflight_enabled() -> bool:
     """B5 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("REMEDIATOR_PREFLIGHT_ENABLED", "0") == "1"
-
 
 REMEDIATOR_PREFLIGHT_QUERIES = 3
 _PREFLIGHT_EXPRS = [
@@ -98,6 +98,16 @@ def _maybe_preflight(state: AgentState, action_plan: list, needs_approval: bool)
 
 
 #remediator node
+
+def _plan_citations(state: AgentState, cap: int = 3) -> list:
+    """tool-result lines from the investigation scratchpad — the evidence a plan
+    must carry so a human (or the attribution report) can see what grounded it."""
+    return [
+        str(e)[6:160]
+        for e in state.get("investigation_scratchpad", [])
+        if str(e).startswith("tool: ")
+    ][-cap:]
+
 def remediator_node(state: AgentState) -> dict:
     if state.get("action_plan"):
         if _preflight_enabled() and state.get("diagnosis_mode") == "deep_agents":
@@ -173,11 +183,15 @@ def remediator_node(state: AgentState) -> dict:
         print("[remediator] Path C -> safe mitigation")
         action_plan = _build_safe_mitigation(state)
 
-    #safety layer: fill blast_radius / approval if not already set by Path A
+    #safety layer: fill blast_radius / approval / reversibility / citations
     needs_approval = False
+    citations = _plan_citations(state)
     for action in action_plan:
         if not action.get("blast_radius"):
             action["blast_radius"] = classify_blast_radius(action)
+        action.setdefault("reversible", action.get("tool") in REVERSIBLE_WRITE_TOOLS)
+        if citations and not action.get("citations"):
+            action["citations"] = citations
         if action.get("requires_approval") is None:
             action["requires_approval"] = requires_human_approval(action)
         if action.get("requires_approval"):
@@ -330,7 +344,7 @@ def _item_from_state_fields(state: AgentState) -> Optional[list]:
         "tool": tool,
         "params": {"service": service},
         "blast_radius": blast,
-        "reversible": True,
+        "reversible": tool in REVERSIBLE_WRITE_TOOLS,
         "requires_approval": False,
         "executed": False,
         "result": None,
@@ -430,7 +444,7 @@ def _extract_from_scratchpad(state: AgentState) -> Optional[list]:
         "tool": tool,
         "params": {"service": service},
         "blast_radius": args.get("blast_radius") or classify_blast_radius({"tool": tool, "params": {"service": service}}),
-        "reversible": True,
+        "reversible": tool in REVERSIBLE_WRITE_TOOLS,
         "requires_approval": False,
         "executed": False,
         "result": None,
@@ -472,7 +486,7 @@ def _llm_extract_proposal(state: AgentState) -> Optional[list]:
         "tool": tool,
         "params": {"service": service},
         "blast_radius": getattr(resp, "blast_radius", None) or classify_blast_radius({"tool": tool, "params": {"service": service}}),
-        "reversible": True,
+        "reversible": tool in REVERSIBLE_WRITE_TOOLS,
         "requires_approval": False,
         "executed": False,
         "result": None,

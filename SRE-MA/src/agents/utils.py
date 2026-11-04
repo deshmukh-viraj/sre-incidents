@@ -68,11 +68,16 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     openrouter_base = os.getenv("OPENAI_API_BASE")
     groq_key = os.getenv("GROQ_API_KEY")
+    nvidia_key = os.getenv("NVIDIA_API_KEY")
     cc_key = os.getenv("CODECRAFT_API_KEY")
-    base_url = os.getenv("base_url") or openrouter_base
+    base_url = os.getenv("OPENAI_BASE_URL") or openrouter_base
     primary_model_cc = os.getenv("LLM_MODEL_CC", "deepseek-v4-flash-0731")
 
     models = []
+    if nvidia_key:
+        models.append(_create_llm(
+            os.getenv("LLM_MODEL_NVIDIA", "nvidia/nemotron-3-ultra-550b-a55b"),
+            temperature, nvidia_key, is_nvidia=True, simple=simple))
     if cc_key:
         models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, simple=simple))
     if openrouter_key:

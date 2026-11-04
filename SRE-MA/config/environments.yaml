@@ -1,0 +1,38 @@
+# environment pack: one block per target environment.
+# the agent only queries backends enabled here; bounds (timeout_s, max_rows) are
+# enforced by the backend layer (src/tools/backends/) on every call.
+# swap an endpoint or add an environment here — never in graph nodes or prompts.
+
+fintech_sim:
+  # fintech-sre-sim compose stack (sim-network or port-forwards)
+  metrics:
+    adapter: prometheus
+    url: http://localhost:9090
+    timeout_s: 10.0
+    max_rows: 100
+  logs:
+    adapter: loki
+    url: http://localhost:3100
+    timeout_s: 15.0
+    max_rows: 50
+  traces:
+    enabled: false        # sim stack ships no tracing backend
+
+sandbox:
+  # otel demo stack on EC2, reached through the SSH tunnels from the runbook:
+  # -L 9091:localhost:9090 (prometheus), -L 3200:localhost:3200 (tempo)
+  metrics:
+    adapter: prometheus
+    url: http://localhost:9091
+    timeout_s: 10.0
+    max_rows: 100
+  logs:
+    adapter: loki
+    url: http://localhost:3100
+    timeout_s: 15.0
+    max_rows: 50
+  traces:
+    adapter: tempo
+    url: http://localhost:3200
+    timeout_s: 10.0
+    max_rows: 20
