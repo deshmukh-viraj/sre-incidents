@@ -61,8 +61,15 @@ DELTA_EFFECT_SECONDS = {
     "execute_kg_suggestion": 45,
 }
 
-#stability windows (gate 5)
-#stability windows determine how long we wait after an action before trusting metrics again
+# remote (AWS OTel demo) flag flips: the alert can only clear after (a) flagd
+# file-sync picks up the write, (b) load-gen traffic resumes, (c) the OTel SDK
+# exports the healthy series (60s export granularity), (d) Prometheus re-evals
+# and pushes the resolve. ponytail: 75s = 15s propagation + 60s export ceiling;
+# the remaining wait is absorbed by the verification polls themselves.
+REMOTE_FLAG_EFFECT_SECONDS = 75
+
+
+#stability windows (gate 5)#stability windows determine how long we wait after an action before trusting metrics again
 T_STABLE_SECONDS = {
     Severity.SEV1.value: 300,
     Severity.SEV2.value: 600,
@@ -197,7 +204,15 @@ def deterministic_diagnosis(state: AgentState) -> dict:
 
     """
     signals = state.get("raw_signals", {})
-    log_patterns = signals.get("log_patterns", {})
+    raw = signals.get("log_patterns") or state.get("log_patterns", {})
+
+    if isinstance(raw, list):
+        log_patterns = {str(item): True for item in raw}
+    elif isinstance(raw, dict):
+        log_patterns = raw
+    else:
+        log_patterns = {}
+
     runbook_id = state.get("runbook_id")
 
     p99 = signals.get("p99_latency_s")

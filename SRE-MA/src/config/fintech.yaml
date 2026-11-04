@@ -1,0 +1,37 @@
+# P10 fintech config pack (TASK D). Only read when CONFIG_PACK_ENABLED=1 (or
+# MULTI_AGENT=1). Values here are the fintech deployment's overrides of the
+# defaults that live in code (routing.py, prometheus_tool.py, remediator
+# runbooks path). Anything omitted falls back to the coded default.
+
+thresholds:
+  P99_LATENCY_CRITICAL: 3.0    # seconds — SEV1
+  P99_LATENCY_WARNING: 1.5     # seconds — SEV2/3
+  P99_LATENCY_RECOVERY: 0.5
+  ERROR_RATE_CRITICAL: 0.10
+  ERROR_RATE_WARNING: 0.05
+  THROTTLE_RATE_HIGH: 0.05
+  DB_POOL_WARNING: 0.85
+  DB_POOL_CRITICAL: 0.98
+  CIRCUIT_BREAKER_OPEN: 1.5
+  SLO_BUDGET_LOW: 0.20
+  DECLINE_RATE_HIGH: 0.05
+  DIAGNOSIS_CONFIDENCE: 0.70
+
+service_aliases:            # alert_name -> service (infer_service map)
+  PaymentGateway: payment_gateway
+  SLOError: payment_gateway
+  SLOBudget: payment_gateway
+  PaymentDecline: payment_gateway
+  PaymentTransaction: payment_gateway
+  CircuitBreaker: payment_gateway
+  DBConnection: account_ledger
+
+gateway_services:           # services that get payment/fraud metric queries
+  - payment_gateway
+  - api_gateway
+
+payment_metrics:
+  decline_counter: payment_transactions_total
+  fraud_latency_histogram: fraud_model_prediction_latency_seconds_bucket
+
+runbooks_path: runbooks/runbooks.json

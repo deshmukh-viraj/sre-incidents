@@ -18,13 +18,21 @@ load_dotenv()
 LOKI_URL = os.getenv("LOKI_URL", "http://localhost:3100")
 
 
-def query_loki(logql: str, limit: int = 50, lookback_minutes: int = 10) -> List[Dict]:
+def query_loki(
+    logql: str,
+    limit: int = 50,
+    lookback_minutes: int = 10,
+    start_ns: Optional[int] = None,
+    end_ns: Optional[int] = None,
+) -> List[Dict]:
     """
     Execute a LogQL query against Loki.
     Returns list of parsed log record dicts.
+    start_ns/end_ns pin an exact epoch-ns window (used by log_tool); when
+    omitted the default lookback_minutes rolling window applies (unchanged).
     """
-    end_ns = int(time.time() * 1e9)
-    start_ns = int((time.time() - (lookback_minutes * 60)) * 1e9)
+    end_ns = end_ns if end_ns is not None else int(time.time() * 1e9)
+    start_ns = start_ns if start_ns is not None else int((time.time() - (lookback_minutes * 60)) * 1e9)
 
     try:
         params = urllib.parse.urlencode({

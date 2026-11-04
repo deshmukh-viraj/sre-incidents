@@ -6,11 +6,12 @@ sandboxed tool set for the DeepAgent/ReAct investigation harness.
 """
 
 import json
+import re
 import urllib.request
 import os
 from langchain_core.tools import tool
 from src.tools.prometheus_tool import _instant_query
-from src.tools.loki_tool import query_loki, extract_log_summary
+from src.tools.log_tool import query_logs
 from src.tools.kg_tool import (
     query_knowledge_graph,
     query_recent_resolved_incident,
@@ -24,8 +25,24 @@ PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 
 # metric families that are simulator-app
 _APP_METRIC_PREFIXES = (
-    "http_", "circuit_", "db_", "payment_", "fraud_", "slo_", "net_conntrack_"
+    "http_", "circuit_", "db_", "payment_", "fraud_", "slo_", "net_conntrack_",
+    # OTel demo (AWS) OTLP-native families
+    "rpc_",
 )
+
+# labels/notes for the remote OTel demo stack (AWS) vs the fintech sim:
+# server-side HTTP metrics use service_name (not service=) and
+# http_response_status_code (not status_code); gRPC is rpc_server_/rpc_client_
+# with rpc_response_status_code (OK | INTERNAL | UNAVAILABLE ...).
+OTEL_DEMO_CATALOG = {
+    "http_server_request_duration_seconds": "{service_name,http_route,http_response_status_code} (hist/cnt)",
+    "http_client_request_duration_seconds": "{service_name,server_address,http_response_status_code} (hist/cnt)",
+    "rpc_server_call_duration_seconds": "{service_name,rpc_service,rpc_method,rpc_response_status_code} (hist/cnt)",
+    "rpc_client_call_duration_seconds": "{service_name,rpc_service,rpc_method,rpc_response_status_code} (hist/cnt)",
+    "feature_flag_evaluation_success_total": "{service_name,feature_flag_key,feature_flag_result_variant}",
+    "feature_flag_evaluation_error_total": "{service_name,feature_flag_key,feature_flag_result_error}",
+    "flagd_replica_follow_refetches": "{service_name}",
+}
 
 METRIC_CATALOG = {
     "http_requests_total": "{service,method,status_code}",
@@ -44,6 +61,8 @@ METRIC_CATALOG = {
     "slo_error_budget_remaining_ratio": "{service,slo_name}",
     "net_conntrack_dialer_conn_failed_total": "{upstream}",
 }
+# merge in the remote-demo families so validate_expr accepts them too
+METRIC_CATALOG.update(OTEL_DEMO_CATALOG)
 
 def validate_expr(expr: str) -> tuple[bool, str]:
     """Validate PromQL expression. Returns (is_valid, error_message)."""
@@ -106,23 +125,52 @@ def query_prometheus_metric(expr: str) -> str:
         return f"query failed: {e}"
 
 @tool
-def query_service_logs(service: str) -> str:
-    """Return up to 6 summarized recent ERROR log lines for a Prometheus-scraped service (example: payment_gateway).
+def query_service_logs(service: str, start: str = "", end: str = "", text: str = "", level: str = "") -> str:
+    """Return TOP log patterns (normalized, with counts) + up to 6 sample lines for a service.
 
-    Use for: extracting concrete failure fingerprints (timeouts, 429s, pool exhaustion,
-    exception types) that metrics alone cannot show.
-    Skip when: the alert state says logs_ok=False (no logs available — state it and
-    move on to another hypothesis instead of burning a round here).
-    Accepts either a bare service name or a full LogQL selector like {service="x",level="error"}.
-    Returns log summaries or the literal 'no error logs' (which is itself useful: it
-    rules out log-visible failure modes).
+    Use for: extracting concrete failure fingerprints (timeouts, 500s, exceptions,
+    queue lag, DNS/network errors) that metrics alone cannot show. Backend is set
+    by the LOG_BACKEND env (local Loki, or the OTel demo's OpenSearch via tunnel).
+
+    Args:
+        service: plain service name (e.g. 'cart', 'payment_gateway'). Legacy
+            LogQL selectors {service="x"} are still accepted.
+        start/end: ISO8601. Omit both -> last 15 min. Passing the alert's fired
+            time in `start` with no `end` widens to alert ±15 min.
+        text: optional substring filter (e.g. 'timeout').
+        level: DEBUG|INFO|WARN|ERROR|FATAL (opensearch: treated as minimum severity).
+
+    HONEST OUTPUT: an unreachable backend, a timeout, or an empty window is
+    reported as 'signal unavailable: <reason>' — that means the signal could not
+    be obtained (or nothing matched the filters/level), NEVER 'no problem found'.
     """
+    if not service or not service.strip():
+        return "signal unavailable: service is required"
+    svc = service.strip()
+    if svc.startswith("{"):
+        m = re.search(r'service="([^"]+)"', svc)
+        if m:
+            svc = m.group(1)
     try:
-        logql = service if service.startswith("{") else f'{{service="{service}"}}'
-        logs = extract_log_summary(query_loki(logql))
-        return "\n".join(logs[:6]) or "no error logs"
+        res = query_logs(
+            svc,
+            start=start or None,
+            end=end or None,
+            text=text or None,
+            level=level or None,
+        )
     except Exception as e:
-        return f"log query failed: {e}"
+        return f"signal unavailable: log backend error: {e}"
+    if not res.get("available"):
+        return (f"signal unavailable (backend={res.get('backend')}, window={res.get('window', {}).get('mode')}): "
+                f"{res.get('reason') or 'no log lines matched'}")
+    rows = [f"backend={res['backend']} window={res['window']['mode']} lines_scanned={res['lines_scanned']}/{res['limit']}"]
+    for p in res["top_patterns"]:
+        rows.append(f"x{p['count']:>3} [{p['level'][:8]}] {p['pattern']}")
+    if res.get("sample_lines"):
+        rows.append("SAMPLES:")
+        rows.extend(f"  {s}" for s in res["sample_lines"])
+    return "\n".join(rows)
 
 @tool
 def query_topology(service: str) -> str:

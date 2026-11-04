@@ -60,7 +60,12 @@ SERVICE_METRICS = {
 METRIC_LABEL_NOTES = (
     "LABEL GOTCHAS: db pool metrics use db=\"postgres_primary\" (NOT service=). "
     "card_rails/postgres are not scraped services — card_rails appears only as the "
-    "upstream label on circuit_breaker_state. Always use the exact names/labels above."
+    "upstream label on circuit_breaker_state. Always use the exact names/labels above. "
+    "For the AWS OpenTelemetry demo stack (alerts carrying environment=aws-oteldemo), "
+    "HTTP metrics use service_name (NOT service=) and http_response_status_code "
+    "(NOT status_code); gRPC metrics are rpc_server_call_duration_seconds / "
+    "rpc_client_call_duration_seconds with rpc_response_status_code=OK|INTERNAL|...; "
+    "checkout PlaceOrder is rpc_method=oteldemo.CheckoutService/PlaceOrder."
 )
 
 try:

@@ -41,6 +41,29 @@ def collect_all_signals(service: str) -> Dict[str, Any]:
     #prometheus metrics
     signals = collect_incident_signals(service)
 
+    #logs: backend chosen by LOG_BACKEND env. opensearch fetches the AWS
+    #otel-demo's logs via the tunnel and applies the honest query_logs contract
+    #(top patterns, <=200 lines, 'signal unavailable' on failure). The default
+    #loki path keeps the original fintech-only queries unchanged.
+    if os.getenv("LOG_BACKEND", "loki") == "opensearch":
+        from src.tools.log_tool import query_logs
+        log_result = query_logs(service)
+        #detect_patterns feeds the legacy DICT fingerprint contract that routing
+        #(routing.py:95) and deep_investigation (deep_investigation.py:86) consume
+        #via lp.get(...) — storing the aggregated list here crashed agent runs.
+        signals["log_patterns"] = detect_patterns(log_result.get("records", []))
+        signals["log_top_patterns"] = log_result.get("top_patterns", [])
+        signals["error_log_summaries"] = log_result.get("sample_lines", [])
+        signals["security_log_summaries"] = []
+        signals["log_window"] = log_result.get("window")
+        signals["logs_signal"] = log_result.get("signal")
+        signals["metrics_ok"] = signals.get("p99_latency_s") is not None
+        signals["logs_ok"] = bool(log_result.get("available"))
+        print(f"[sre_tools] logs({log_result.get('backend')}): available={signals['logs_ok']} "
+              f"lines={log_result.get('lines_scanned')}/{log_result.get('limit')} "
+              f"patterns={len(signals['log_top_patterns'])}")
+        return signals
+
     #loki logs
     error_logs = query_loki(f'{{service="{service}"}} | json | level="ERROR"', limit=20)
     sec_logs = query_loki('{service="api_gateway"} | json | audit_required="true"', lookback_minutes=10)
@@ -113,6 +136,33 @@ def execute_remediation(action: str, tool: str, params: Dict[str, Any]) -> Dict[
         }
 
     try:
+        # remote (AWS OTel demo) remediation: the affected stack is not the local
+        # fintech simulator, so there is nothing to POST to simulator:8001 — flags
+        # are flipped through the aws-tunnel admin bridge instead.
+        if tool == "set_feature_flag" and params.get("remote"):
+            admin_url = os.getenv("AWS_ADMIN_URL", "http://aws-tunnel:8085")
+            req = urllib.request.Request(
+                f"{admin_url}/set-flag",
+                data=json.dumps({"flag": params.get("flag"), "variant": params.get("variant")}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=45.0) as response:
+                body = json.loads(response.read().decode())
+            if body.get("success"):
+                return {
+                    "success": True,
+                    "result": f"Remote flag {body.get('flag')} set {body.get('before')} -> {body.get('after')}. Infra reacting.",
+                    "dry_run": False,
+                    "executed_at": ts,
+                }
+            return {
+                "success": False,
+                "error": f"remote set-flag rejected: {json.dumps(body)[:200]}",
+                "dry_run": False,
+                "executed_at": ts,
+            }
+
         req = urllib.request.Request("http://simulator:8001/control/resolve", method="POST")
         with urllib.request.urlopen(req, timeout=5.0) as response:
             if response.status == 200:
@@ -184,10 +234,12 @@ def check_alert_status(alert_name: str) -> str:
                 print(f"[sre_tool] Alert {alert_name} is still firing/pending")
                 return "firing"
         
-        #if the alert is not found in alertmanager at all, it has resolved or never exited
-        # we return 'unknown' so the agent can verify via promethes fallback
-        print(f"[sre_tool] Alert {alert_name} not found in alertmanager. require fallabck")
-        return "unknown"
+        #if the alert is not found in alertmanager at all, it has resolved (the
+        # query succeeded and named alerts are absent — that IS resolution).
+        # 'unknown' is reserved for AM query failures, so the verify loop can
+        # fall back to prometheus metrics instead of trusting a dead query.
+        print(f"[sre_tool] Alert {alert_name} not found in alertmanager -> resolved")
+        return "resolved"
     except Exception as e:
         print(f"[sre_tool] Alertmanager api call failed: {e}")
         return "unknown"

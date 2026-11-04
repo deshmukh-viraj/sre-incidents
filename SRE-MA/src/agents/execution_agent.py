@@ -24,7 +24,7 @@ from src.tools.prometheus_tool import collect_incident_signals
 from src.tools.kg_tool import append_past_incident
 from src.graph.policy import idem_key
 
-from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS
+from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS, REMOTE_FLAG_EFFECT_SECONDS
 from src.graph.clear_time import build_clear_evidence
 from src.graph.attribution_gates import evaluate_gate3, final_label
 from src.agents.schemas import VerificationResult, ExecutionReceipt
@@ -39,10 +39,27 @@ except ImportError:
         return decorator
 
 
+<<<<<<< Updated upstream
 def _recovery_checker_enabled() -> bool:
     """B2 RecoveryChecker flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("RECOVERY_CHECKER_ENABLED", "0") == "1"
+=======
+def log_stage(incident_id: str, stage: str, detail: str = ""):
+    """clean stage logger for real-time visibility."""
+    suffix = f" | {detail}" if detail else ""
+    print(f"\n[{incident_id}] ▶ {stage}{suffix}")
+
+
+@dataclass
+class VerificationResult:
+    verified: bool
+    p99_latency_s: Optional[float] = None
+    error_rate: Optional[float] = None
+    t_clear: Optional[str] = None
+    signal: Optional[str] = None
+    healthy_run_len: int = 0 
+>>>>>>> Stashed changes
 
 
 def _executor_receipts_enabled() -> bool:
@@ -98,9 +115,10 @@ def human_gate_node(state: AgentState) -> dict:
 
     # deterministic human approval
     if not needs_approval or os.getenv("SIM_AUTO_APPROVE", "false").lower() == "true":
-        print(f"\n[human_gate] Auto approved for {incident_id} (requires_approval={needs_approval})")
+        log_stage(incident_id, "HUMAN_GATE", f"auto-approved (requires_approval={needs_approval})")
         return {"human_approved": True, "approval_timeout": False}
 
+<<<<<<< Updated upstream
     # natural-calm soak (INC-Paymen-9023): a transient spike can recover while the
     # pipeline investigates; paging a human for an alert that already calmed is a
     # false page. SEV2/SEV3 only (SEV1 pages immediately), fresh live signals,
@@ -137,6 +155,9 @@ def human_gate_node(state: AgentState) -> dict:
 
     # llm /destructive (requires approval)
     print(f"[human_gate] Interrupting graph for {incident_id} awaiting for human approval...")
+=======
+    log_stage(incident_id, "HUMAN_GATE", f"waiting for approval (requires_approval={needs_approval})")
+>>>>>>> Stashed changes
 
     actions_text = ""
     for a in state.get("action_plan", []):
@@ -150,6 +171,7 @@ def human_gate_node(state: AgentState) -> dict:
         "question": "Do you approve the action plan?",
         "incident_id": incident_id
     })
+<<<<<<< Updated upstream
     print(f"[human gate] Resumed {incident_id} with human input: {human_decsion}")
     message = (
         f" *Approval decision for {incident_id}*\n"
@@ -160,6 +182,9 @@ def human_gate_node(state: AgentState) -> dict:
         f" by {human_decsion.get('approver', 'system')}\n"
     )
     notify_slack(message=message, channel="incidents", severity="warning", incident_id=incident_id)
+=======
+    log_stage(incident_id, "HUMAN_GATE", f"resumed with input: {human_decsion.get('approved', False)}")
+>>>>>>> Stashed changes
     return {
         "human_approved": human_decsion.get("approved", False),
         "approved_by": human_decsion.get("approver", "system"),
@@ -192,7 +217,7 @@ def _verify_recovery(
     pre_p99 = pre_metrics.get("p99_latency_s")
     pre_error = pre_metrics.get("error_rate")
 
-    print(f"[execute] waiting {grace_period}s grace period for action to propagate...")
+    log_stage(alert_name, "VERIFICATION_GRACE", f"waiting {grace_period}s for action to propagate...")
     time.sleep(grace_period)
 
     consecutive_healthy = 0
@@ -201,12 +226,12 @@ def _verify_recovery(
     curr_error = None
 
     for i in range(polls):
-        print(f"[execute] verification poll {i+1}/{polls}:")
+        log_stage(alert_name, f"VERIFY_POLL {i+1}/{polls}", f"grace={grace_period}s, interval={interval}s")
 
         #secondary: quick alertmanager check
         am_state = check_alert_status(alert_name)
         if am_state not in ("firing", "unknown"):
-            print(f"[execute] Alert explicitly resolved in Alertmanager")
+            log_stage(alert_name, "AM_RESOLVED", f"Alertmanager state={am_state}")
             signals = collect_incident_signals(service, window="1m")
             curr_p99 = signals.get("p99_latency_s")
             curr_error = signals.get("error_rate")
@@ -221,45 +246,44 @@ def _verify_recovery(
                 healthy_run_len=max(consecutive_healthy, min_consecutive),
             )
 
-        #primary: prometheus metric comparison 
-        print(f"[execute] Checking prometheus metrics for {service}...")
+                #primary: prometheus metric comparison 
+        log_stage(alert_name, "VERIFY_METRICS", f"querying {service} metrics...")
         signals = collect_incident_signals(service, window="1m")
         curr_p99 = signals.get("p99_latency_s")
         curr_error = signals.get("error_rate")
        
-
         # check if p99 latency improved (dropped below warning threshold OR improved by >50%)
         p99_ok = False
         if curr_p99 is not None:
             if curr_p99 < P99_LATENCY_RECOVERY:
                 p99_ok = True
-                print(f"[execute] p99={curr_p99:.3f}s < {P99_LATENCY_RECOVERY}s threshold")
+                log_stage(alert_name, "P99_RECOVERED", f"p99={curr_p99:.3f}s < {P99_LATENCY_RECOVERY}s")
             elif pre_p99 is not None and curr_p99 < pre_p99 * 0.5:
                 p99_ok = True
-                print(f"[execute] p99 improved {pre_p99:.3f}s -> {curr_p99:.3f}s")
+                log_stage(alert_name, "P99_IMPROVED", f"p99 {pre_p99:.3f}s -> {curr_p99:.3f}s")
             else:
-                print(f"[execute] p99={curr_p99:.3f}s still elevated (pre={pre_p99}s, threshold={P99_LATENCY_RECOVERY}s)")
+                log_stage(alert_name, "P99_STILL_HIGH", f"p99={curr_p99:.3f}s (pre={pre_p99}s, thresh={P99_LATENCY_RECOVERY}s)")
 
         # check if error rate improved
         error_ok = False
         if curr_error is not None:
             if curr_error < ERROR_RATE_WARNING:
                 error_ok = True
-                print(f"[execute] error_rate={curr_error:.4f} < {ERROR_RATE_WARNING} threshold")
+                log_stage(alert_name, "ERROR_RATE_RECOVERED", f"error_rate={curr_error:.4f} < {ERROR_RATE_WARNING}")
             elif pre_error is not None and curr_error < pre_error * 0.5:
                 error_ok = True
-                print(f"[execute] error_rate improved {pre_error:.4f} ->{curr_error:.4f} ")
+                log_stage(alert_name, "ERROR_RATE_IMPROVED", f"error_rate {pre_error:.4f} -> {curr_error:.4f}")
             else:
-                print(f"[execute] error_rate={curr_error:.4f} still elevated (pre={pre_error}, threshold={ERROR_RATE_WARNING})")
+                log_stage(alert_name, "ERROR_RATE_STILL_HIGH", f"error_rate={curr_error:.4f} (pre={pre_error}, thresh={ERROR_RATE_WARNING})")
 
         #require at least min_consecutive healthy checks before confirming recovery to avoid premature close on single dip
         if p99_ok or error_ok:
             consecutive_healthy += 1
             if first_healthy_ts is None:
                 first_healthy_ts = datetime.datetime.utcnow().isoformat()
-            print(f"[execute] Metrics healthy ({consecutive_healthy}/{min_consecutive} consecutive checks)")
+            log_stage(alert_name, "HEALTHY", f"consecutive={consecutive_healthy}/{min_consecutive}")
             if consecutive_healthy >= min_consecutive:
-                print(f"[execute] Prometheus metrics confirm sustained recovery (p99_ok={p99_ok}, error_ok={error_ok}, run_len={consecutive_healthy})")
+                log_stage(alert_name, "METRICS_RECOVERED", f"p99_ok={p99_ok}, error_ok={error_ok}, run_len={consecutive_healthy}")
                 return VerificationResult(
                     verified=True,
                     p99_latency_s=curr_p99,
@@ -272,10 +296,10 @@ def _verify_recovery(
             consecutive_healthy = 0
             first_healthy_ts = None
 
-        print(f"[execute] Metrics not yet stable/recovered. Waiting {interval}s before next poll...")
+        log_stage(alert_name, "POLL_WAIT", f"metrics not stable, waiting {interval}s...")
         time.sleep(interval)
 
-    print(f"[execute] Exhausted {polls} polls — metrics did not recover")
+    log_stage(alert_name, "VERIFICATION_EXHAUSTED", f"exhausted {polls} polls — no recovery")
     return VerificationResult(
         verified=False,
         p99_latency_s=curr_p99,
@@ -284,7 +308,6 @@ def _verify_recovery(
         signal=None,
         healthy_run_len=consecutive_healthy,
     )
-
 def _signal_expr(service: str, signal: Optional[str]) -> tuple[str, float, str]:
     """
     maps the verification signal (which metric actually recovered) to the prometheus expression
@@ -312,7 +335,8 @@ def execute_node(state: AgentState) -> dict:
     records outcome in neo4j graph.
     also checks if the metric got better before marking as resolved, so we dont lie.
     """
-    print(f"\n[execute] Executing action plan for {state['incident_id']}")
+    incident_id = state['incident_id']
+    log_stage(incident_id, "EXECUTION_START", f"plan has {len(state.get('action_plan', []))} actions")
 
     # gate-1: claim (capture the timestamp the moment the agent takes the wheel)
     t_claim = datetime.datetime.utcnow().isoformat()
@@ -338,31 +362,47 @@ def execute_node(state: AgentState) -> dict:
 
     # snapshot pre-remediation metrics so we can compare after  
     pre_metrics = state.get("raw_signals", {})
-    print(f"[execute] Pre-remediation snapshot: p99={pre_metrics.get('p99_latency_s')}, error_rate={pre_metrics.get('error_rate')}")
+    log_stage(incident_id, "PRE_REMEDIATION", f"p99={pre_metrics.get('p99_latency_s')}, error_rate={pre_metrics.get('error_rate')}")
     
     is_shadow = bool(state.get("shadow_execution"))
     if is_shadow:
-        print(f"[execute] SHADOW mode active for {state['incident_id']} — suppressing execution")
+        log_stage(incident_id, "EXECUTION", "SHADOW mode — suppressing execution")
+
+    # remote (AWS OTel demo) remediation: the alert labels authorize the exact
+    # flag+variant, so override whatever the proposal carried and mark the
+    # action remote so sre_tool routes it to the aws-tunnel admin bridge.
+    raw_alarm = state.get("raw_signals") or {}
+    remote_flag_authorized = bool(raw_alarm.get("remote_flag"))
 
     action_start_ts = datetime.datetime.utcnow()
     for action in action_plan:
         key = idem_key(state["incident_id"], action)
         if key in executed_keys:
-            print(f"[execute] idempotent skip: {key}")
+            log_stage(incident_id, "EXECUTION", f"idempotent skip: {key}")
             updated_plan.append({**action, "executed": True, "result": "idempotent skip"})
             continue
+        params = action["params"]
         if is_shadow:
-            print(f"[execute] SHADOW: suppressing {action['action']}")
+            log_stage(incident_id, "EXECUTION", f"SHADOW: suppressing {action['action']}")
             result = {"success": True, "result": "shadow, no-op", "dry_run": True}
         else:
+            if action.get("tool") == "set_feature_flag" and remote_flag_authorized:
+                params = {
+                    **params,
+                    "flag": raw_alarm["remote_flag"],
+                    "variant": raw_alarm.get("remote_variant", params.get("variant", "off")),
+                    "remote": True,
+                }
+                action = {**action, "params": params}
+                log_stage(incident_id, "REMOTE_EXECUTION", f"flag='{params['flag']}' -> variant='{params['variant']}'")
             result = execute_remediation(
                 action=action["action"],
                 tool=action["tool"],
-                params=action["params"],
+                params=params,
             )
-        
+
         # gate-2: executin and target binding
-        target_service = action["params"].get("service", service)
+        target_service = params.get("service", service)
         target_bound = target_service in affected_services
 
         execution_evidence.append({
@@ -416,6 +456,13 @@ def execute_node(state: AgentState) -> dict:
     grace_period = max(
         (DELTA_EFFECT_SECONDS.get(a.get("tool", ""), 30) for a in action_plan), default=30,
     )
+    # remote OTLP demo: alert clearing waits on the 60s OTLP export cadence +
+    # the rule's for-window, so remote flag flips get a longer generous budget
+    remote_flip = action_plan and remote_flag_authorized and any(
+        a.get("tool") == "set_feature_flag" for a in action_plan
+    )
+    if remote_flip:
+        grace_period = max(REMOTE_FLAG_EFFECT_SECONDS, grace_period)
 
     # gate-4: verification initiate safe defaults
     alert_name = state.get("alert_name", "unknown")
@@ -430,11 +477,17 @@ def execute_node(state: AgentState) -> dict:
 
     if all_success:
         print(f"[execute] Verifying recovery for {alert_name} (service={service})...")
+        verify_kwargs = {}
+        if remote_flip:
+            # alert clears ~5.5m after evals stop (5m window + AM group wait)
+            # trust AM clearance as primary signal; shorter budget for demo speed
+            verify_kwargs = {"polls": 14, "interval": 25}
         result = _verify_recovery(
             alert_name=alert_name,
             service=service,
             pre_metrics=pre_metrics,
-            grace_period=grace_period
+            grace_period=grace_period,
+            **verify_kwargs,
         )
         verified = result.verified
         final_p99 = result.p99_latency_s

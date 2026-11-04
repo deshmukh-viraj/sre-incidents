@@ -43,7 +43,7 @@ def _extract_usage(msg) -> tuple[int, int]:
 
 
 def _accumulate_usage(messages: list) -> tuple[int, int]:
-    """sum input/output tokens across all messages, avoiding doublecounting."""
+    """sum input/output tokens across all messages avoiding doublecounting."""
     total_input = 0
     total_output = 0
     for m in messages:

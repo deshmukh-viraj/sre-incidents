@@ -55,9 +55,18 @@ def collect_incident_signals(service: str, window: str = "5m") -> Dict[str, Any]
         "service_memory_mb": round(val / 1_000_000, 1) if (val := _instant_query(f'process_memory_rss_bytes{{service="{service}"}}')) else None,
     }
 
-    if service in ("payment_gateway", "api_gateway"):
+    # P10: gateway special case + payment metric names from the config pack
+    from src.config.loader import config_pack
+    pack = config_pack()
+    gateways = pack.get("gateway_services") or ("payment_gateway", "api_gateway")
+    pay_metrics = pack.get("payment_metrics") or {}
+    decline_counter = pay_metrics.get("decline_counter", "payment_transactions_total")
+    fraud_hist = pay_metrics.get("fraud_latency_histogram",
+                                 "fraud_model_prediction_latency_seconds_bucket")
+
+    if service in gateways:
         pay_window = window if window != "5m" else "10m"
-        signals["payment_decline_rate"] = _instant_query(f'sum(rate(payment_transactions_total{{status="declined"}}[{pay_window}])) / sum(rate(payment_transactions_total[{pay_window}]))')
-        signals["fraud_model_latency_p99"] = _instant_query(f'histogram_quantile(0.99, rate(fraud_model_prediction_latency_seconds_bucket[{window}]))')
+        signals["payment_decline_rate"] = _instant_query(f'sum(rate({decline_counter}{{status="declined"}}[{pay_window}])) / sum(rate({decline_counter}[{pay_window}]))')
+        signals["fraud_model_latency_p99"] = _instant_query(f'histogram_quantile(0.99, rate({fraud_hist}[{window}]))')
 
     return signals
