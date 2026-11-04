@@ -196,6 +196,7 @@ def _run_agent(incident_id: str, raw_signals: dict, config: Optional[dict] = Non
         if incident_id in _incidents:
             _incidents[incident_id].update({
                 "trace_id": result.get("trace_id") or _incidents[incident_id].get("trace_id"),
+                "trace_url": result.get("trace_url") or _incidents[incident_id].get("trace_url"),
                 "status": result.get('resolution_status'),
                 "severity": result.get('severity'),
                 "root_cause": result.get('root_cause'),
@@ -219,19 +220,22 @@ def _run_agent(incident_id: str, raw_signals: dict, config: Optional[dict] = Non
             })
 
         status = result.get('resolution_status')
-        _record_attribution(result, raw_signals.get('severity', 'unknown'))
+        if status == ResolutionStatus.WAITING_FOR_APPROVAL.value:
+            print(f"[agent] Graph paused for {incident_id} — awaiting human approval")
+        else:
+            _record_attribution(result, raw_signals.get('severity', 'unknown'))
 
-        business_mttr = result.get("business_mttr_seconds")
-        if business_mttr:
-            business_mttr_hist.observe(business_mttr)
-        agent_mttr = result.get("agent_mttr_seconds")
-        if agent_mttr:
-            agent_mttr_hist.observe(agent_mttr)
-        tokens = result.get('total_tokens_used', 0)
-        if tokens:
-            token_counter.inc(tokens)
+            business_mttr = result.get("business_mttr_seconds")
+            if business_mttr:
+                business_mttr_hist.observe(business_mttr)
+            agent_mttr = result.get("agent_mttr_seconds")
+            if agent_mttr:
+                agent_mttr_hist.observe(agent_mttr)
+            tokens = result.get('total_tokens_used', 0)
+            if tokens:
+                token_counter.inc(tokens)
 
-        print(f"[agent] Graph completed for {incident_id} —> status={status}")
+            print(f"[agent] Graph completed for {incident_id} —> status={status}")
 
     except Exception as e:
         print(f"[agent]  AGENT CRASHED for {incident_id} ")
@@ -289,7 +293,7 @@ def _attribution_fields(result: dict) -> dict:
     }
 
 
-def _resume_agent(incident_id: str, config: dict):
+def _resume_agent(incident_id: str, config: dict, resume_payload: Optional[dict] = None):
     try:
         inc_data = _incidents.get(incident_id, {})
         current_status = str(inc_data.get("status", "")).lower()
@@ -315,7 +319,11 @@ def _resume_agent(incident_id: str, config: dict):
         }
 
         from src.graph.orchestrator import app as sre_graph
-        result = sre_graph.invoke(None, config=resume_config)
+        from langgraph.types import Command
+        # P7: interrupt() + Command(resume=...) — the decision reaches the
+        # paused human_gate node directly (replaces update_state + invoke(None))
+        resume_input = Command(resume=resume_payload) if resume_payload is not None else None
+        result = sre_graph.invoke(resume_input, config=resume_config)
 
         if incident_id in _incidents:
             _incidents[incident_id].update({
@@ -346,6 +354,10 @@ def _resume_agent(incident_id: str, config: dict):
         )
 
         print(f"[agent] Graph completed for {incident_id} — status={result.get('resolution_status')}")
+        # the paused run computed the Langfuse UI url once — republish it on resume
+        trace_url = _incidents.get(incident_id, {}).get("trace_url")
+        if trace_url:
+            print(f"[langfuse] View trace in browser: {trace_url}")
 
     except Exception as e:
         print(f"[agent]  AGENT CRASHED during resume for {incident_id}")
@@ -666,13 +678,6 @@ async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, r
                 detail=f"Incident {incident_id} graph is not awaiting approval (status={current_status})."
             )
 
-        agent_graph.update_state(config, values={"human_approved": req.approved, 
-        "human_gate": "human_approved",
-        "approved_by": req.approver,
-        "approved_at": _utcnow().isoformat(),
-        },
-        as_node="human_gate")
-
         incident["approved_by"] = req.approver
         incident["approved_at"] = _utcnow().isoformat()
         if req.notes:
@@ -682,7 +687,11 @@ async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, r
         if trace_id:
             log_human_feedback(trace_id=trace_id, approved=req.approved, notes=req.notes, approver=req.approver)
 
-        background_tasks.add_task(_resume_agent, incident_id, config)
+        # P7: canonical HITL resume — the node's interrupt() receives the
+        # decision directly via Command(resume=...); human_gate_node writes
+        # human_approved/approved_by itself (no update_state re-invoke dance).
+        resume_payload = {"approved": req.approved, "approver": req.approver}
+        background_tasks.add_task(_resume_agent, incident_id, config, resume_payload)
 
         return {
             "status": "approved" if req.approved else "rejected",
