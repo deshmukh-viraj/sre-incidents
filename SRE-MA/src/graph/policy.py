@@ -47,6 +47,9 @@ def policy_validator_node(state) -> dict:
     
 
 def route_after_policy(state) -> Literal["human_gate", "execute", "escalate"]:
+    #budget-exhausted mid-remediation -> escalate (handoff)
+    if state.get("budget_exhausted"):
+        return "escalate"
     if not state.get("plan_viable", True):
         return "escalate"
     return "human_gate" if state.get("requires_approval") else "execute"
@@ -59,6 +62,9 @@ def route_after_critic(state) -> Literal["repair_proposal", "remediator", "deep_
     agent's own escalation request or the hard reject ceiling (escalate_reason
     set by the critic) always escalates first, and a double rejection must never
     send an empty plan to the remediator (INC-SLOBur-FF52)."""
+    # P9: budget middleware fired -> single escalation path (B7 handoff)
+    if state.get("budget_exhausted"):
+        return "escalate"
     if state.get("escalate_reason"):
         return "escalate"
     if not state.get("requires_retry"):
