@@ -737,8 +737,8 @@ async def agent_status():
         pass
 
     try:
-        from src.tools.kg_tool import _get_driver
-        driver = _get_driver()
+        from src.tools import kg_tool
+        driver = kg_tool.driver
         if driver:
             with driver.session() as s:
                 s.run("RETURN 1")
