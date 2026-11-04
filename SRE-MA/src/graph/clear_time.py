@@ -139,8 +139,17 @@ def query_range(
         {"query": expr, "start": f"{_to_unix(start):.3f}", "end": f"{_to_unix(end):.3f}", "step": f"{step}s"}
     )
 
-    with urllib.request.urlopen(f"{base_url}/api/v1/query_range?{params}", timeout=timeout) as fh:
-        payload = json.loads(fh.read().decode())
+    # one retry for transient transport
+    payload = None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/v1/query_range?{params}", timeout=timeout) as fh:
+                payload = json.loads(fh.read().decode())
+            break
+        except OSError as e:
+            if attempt:
+                raise
+            print(f"[clear_time] query_range transport error ({e}); retrying once")
 
     if payload.get("status") != "success":
         raise RuntimeError(f"prometheus query_range failed: {payload.get('error')}")
