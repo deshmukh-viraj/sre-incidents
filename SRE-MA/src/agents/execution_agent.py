@@ -21,7 +21,7 @@ from langgraph.types import interrupt
 from src.graph.state import AgentState, ResolutionStatus
 from src.tools.sre_tool import execute_remediation, notify_slack, check_alert_status
 from src.tools.prometheus_tool import collect_incident_signals
-from src.tools.kg_tool import append_past_incident
+from src.tools.kg_tool import append_past_incident, get_dependencies
 from src.graph.policy import idem_key
 
 from src.graph.routing import DELTA_EFFECT_SECONDS, P99_LATENCY_RECOVERY, ERROR_RATE_WARNING, VERIFICATION_OVERHEAD_SECONDS, REMOTE_FLAG_EFFECT_SECONDS, REMOTE_FLAG_PROPAGATION_SECONDS
@@ -380,12 +380,23 @@ def execute_node(state: AgentState) -> dict:
         # gate-2: executin and target binding
         target_service = params.get("service", service)
         target_bound = target_service in affected_services
+        target_bound_via = "affected_service" if target_bound else "none"
+        if not target_bound:
+            # dependency-targeted remediation: an action on a declared
+            # dependency of the alerted service is bound to the affected
+            # system (the KG seeds exactly this relation; the static
+            # topology fallback supplies it when Neo4j is down)
+            deps = get_dependencies(service) or []
+            if target_service in deps:
+                target_bound = True
+                target_bound_via = "dependency_graph"
 
         execution_evidence.append({
             "action": action['action'],
             "tool": action['tool'],
             "target_service": target_service,
             "target_bound":target_bound,
+            "target_bound_via": target_bound_via,
             "success":result.get("success") or False,
             "t_action_end": datetime.datetime.utcnow().isoformat(),
         })

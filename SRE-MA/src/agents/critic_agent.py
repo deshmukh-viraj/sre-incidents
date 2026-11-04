@@ -92,11 +92,22 @@ def critic_node(state: AgentState) -> dict:
             concerns.append(f"ungrounded proposal: tool '{tool}' not in allowed write tools "
                             f"{sorted(ALLOWED_WRITE_TOOLS)}")
             is_rejected = True
-        elif tgt != service and tgt not in (get_dependencies(service) or []):
+        elif tgt != service:
             deps = get_dependencies(service) or []
-            concerns.append(f"ungrounded proposal: target '{tgt}' is neither '{service}' "
-                            f"nor in its dependencies ({deps})")
-            is_rejected = True
+            if tgt in deps:
+                pass  # target is a declared dependency — binding verified
+            elif deps:
+                # KG answered and the target is genuinely unrelated
+                concerns.append(f"ungrounded proposal: target '{tgt}' is neither '{service}' "
+                                f"nor in its dependencies ({deps})")
+                is_rejected = True
+            else:
+                # dependency graph unavailable (KG down): target binding cannot
+                # be verified either way — a human confirms instead of the
+                # critic wrongly rejecting a possibly-correct target
+                concerns.append(f"target-binding unverifiable (dependency graph unavailable): "
+                                f"target '{tgt}' — routing to human approval")
+                force_approval = True
         elif state.get("diagnosis_mode") == "deep_agents" and not _has_tool_results(state):
             #spec: autonomous execution requires mandatory tool-result citations.
             #a proposal with zero recorded tool results is not auto-executed —

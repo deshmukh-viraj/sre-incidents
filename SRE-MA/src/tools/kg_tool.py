@@ -6,7 +6,7 @@ we use this to figure out dependencies, docs, and what fixed stuff before.
 """
 
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -291,7 +291,7 @@ def find_active_upstream_incident(service: str, window_min: int = 30) -> Optiona
 
 
 def get_dependencies(service: str, hops: int=2) -> List[str]:
-    if driver is None: return []
+    if driver is None: return _fallback_deps(service, hops)
     try:
         with driver.session() as session:
             result = session.run(
@@ -301,5 +301,40 @@ def get_dependencies(service: str, hops: int=2) -> List[str]:
             )
             return [r["name"] for r in result]
     except Exception as e:
-        print(f"[kg_tool] get_dependencies({service}, hops={hops}) failed: {e}")
-        return []
+        print(f"[kg_tool] get_dependencies({service}, hops={hops}) failed: {e} — using static topology fallback")
+        return _fallback_deps(service, hops)
+
+
+# static topology fallback (same data kg_ingest seeds): keeps target-binding
+# verification working when Neo4j is unreachable — e.g. the sandbox regime,
+# where the agent runs far from the demo stack and no KG store exists.
+_STATIC_FALLBACK_TOPOLOGY: Dict[str, List[str]] = {
+    # fintech sim (kg_ingest.DEPENDENCIES)
+    "api_gateway": ["payment_gateway", "kyc_service", "account_ledger"],
+    "payment_gateway": ["card_rails", "fraud_detector", "account_ledger"],
+    "kyc_service": ["mongodb"],
+    "fraud_detector": ["redis"],
+    "account_ledger": ["postgres_primary", "postgres_replica"],
+    "notification_service": ["account_ledger"],
+    # opentelemetry demo (sandbox pack)
+    "frontend": ["cart", "checkout", "ad", "currency", "product-catalog",
+                  "quote", "recommendation", "shipping", "email"],
+    "checkout": ["cart", "currency", "payment", "product-catalog",
+                  "quote", "shipping", "email"],
+    "cart": ["valkey-cart", "feature-flag"],
+    "payment": ["kafka"],
+    "recommendation": ["product-catalog"],
+}
+
+
+def _fallback_deps(service: str, hops: int = 2) -> List[str]:
+    out, frontier = [], [service]
+    for _ in range(max(hops, 1)):
+        nxt = []
+        for s in frontier:
+            for dep in _STATIC_FALLBACK_TOPOLOGY.get(s, []):
+                if dep != service and dep not in out:
+                    out.append(dep)
+                    nxt.append(dep)
+        frontier = nxt
+    return out
