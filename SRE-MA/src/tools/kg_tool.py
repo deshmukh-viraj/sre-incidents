@@ -57,16 +57,62 @@ SERVICE_METRICS = {
     "redis": [],
     "kafka": [],
 }
-METRIC_LABEL_NOTES = (
+# per-environment label gotchas: the fintech-sim conventions and the otel-demo
+# conventions differ (service= vs service_name=, status_code vs
+# http_response_status_code) — showing the wrong block steers every query
+# away from live data, so list_tools pick by service.
+_FINTECH_LABEL_NOTES = (
     "LABEL GOTCHAS: db pool metrics use db=\"postgres_primary\" (NOT service=). "
     "card_rails/postgres are not scraped services — card_rails appears only as the "
-    "upstream label on circuit_breaker_state. Always use the exact names/labels above. "
-    "For the AWS OpenTelemetry demo stack (alerts carrying environment=aws-oteldemo), "
-    "HTTP metrics use service_name (NOT service=) and http_response_status_code "
-    "(NOT status_code); gRPC metrics are rpc_server_call_duration_seconds / "
-    "rpc_client_call_duration_seconds with rpc_response_status_code=OK|INTERNAL|...; "
-    "checkout PlaceOrder is rpc_method=oteldemo.CheckoutService/PlaceOrder."
+    "upstream label on circuit_breaker_state. Always use the exact names/labels above."
 )
+_OTEL_LABEL_NOTES = (
+    "LABEL GOTCHAS (OpenTelemetry demo): HTTP metrics use service_name "
+    "(NOT service=) and http_response_status_code (NOT status_code); gRPC metrics "
+    "are rpc_server_call_duration_seconds / rpc_client_call_duration_seconds with "
+    "rpc_response_status_code=OK|INTERNAL|...; checkout PlaceOrder is "
+    "rpc_method=oteldemo.CheckoutService/PlaceOrder. Feature-flag evidence lives in "
+    "feature_flag_evaluation_success_total{service_name=...,feature_flag_key=...}."
+)
+
+
+def label_notes_for(service: str) -> str:
+    """the label conventions that apply to THIS service's environment."""
+    return _OTEL_LABEL_NOTES if service in OTEL_DEMO_SERVICE_METRICS else _FINTECH_LABEL_NOTES
+
+
+# curated PromQL for the OpenTelemetry demo (AWS) services: same shape as the
+# fintech map — keyed by service, used by list_metrics and the KG seeder.
+OTEL_DEMO_SERVICE_METRICS = {
+    "frontend": [
+        'http_server_request_duration_seconds_bucket{service_name="frontend"}',
+        'sum(rate(http_server_request_duration_seconds_count{service_name="frontend",http_response_status_code=~"5.."}[5m])) / sum(rate(http_server_request_duration_seconds_count{service_name="frontend"}[5m]))',
+    ],
+    "cart": [
+        'http_server_request_duration_seconds_bucket{service_name="cart"}',
+        'rpc_server_call_duration_seconds_bucket{service_name="cart"}',
+        'feature_flag_evaluation_success_total{service_name="cart"}',
+        'feature_flag_evaluation_error_total{service_name="cart"}',
+    ],
+    "checkout": [
+        'rpc_server_call_duration_seconds_bucket{service_name="checkout",rpc_method="oteldemo.CheckoutService/PlaceOrder"}',
+        'http_server_request_duration_seconds_count{service_name="checkout",http_response_status_code=~"5.."}',
+    ],
+    "payment": [
+        'rpc_server_call_duration_seconds_bucket{service_name="payment"}',
+    ],
+    "email": ['http_server_request_duration_seconds_bucket{service_name="email"}'],
+    "shipping": ['http_server_request_duration_seconds_bucket{service_name="shipping"}'],
+    "currency": ['rpc_server_call_duration_seconds_bucket{service_name="currency"}'],
+    "product-catalog": ['rpc_server_call_duration_seconds_bucket{service_name="product-catalog"}'],
+    "recommendation": ['rpc_server_call_duration_seconds_bucket{service_name="recommendation"}'],
+    "quote": ['http_server_request_duration_seconds_bucket{service_name="quote"}'],
+    "ad": ['rpc_server_call_duration_seconds_bucket{service_name="ad"}'],
+}
+
+# one catalog: environments never collide on service names
+# (payment_gateway vs cart/checkout), so per-service selection is unambiguous.
+SERVICE_METRICS = {**SERVICE_METRICS, **OTEL_DEMO_SERVICE_METRICS}
 
 try:
     import logging
@@ -165,7 +211,7 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
                     if dep_metrics:
                         context_sections.append(f"[Metrics: {dep['dependency']}] Exact PromQL to query: {', '.join(dep_metrics)}")
                 if metrics or deps:
-                    context_sections.append(f"[Label Notes] {METRIC_LABEL_NOTES}")
+                    context_sections.append(f"[Label Notes] {label_notes_for(service)}")
 
     except Exception as e:
         return f"knowledge graph query failed: {str(e)}"

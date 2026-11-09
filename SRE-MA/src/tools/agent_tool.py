@@ -19,7 +19,7 @@ from src.tools.kg_tool import (
     query_knowledge_graph,
     query_recent_resolved_incident,
     SERVICE_METRICS,
-    METRIC_LABEL_NOTES,
+    label_notes_for,
 )
 from src.tools.sre_tool import lookup_runbook
 from src.graph.policy import ALLOWED_WRITE_TOOLS
@@ -133,20 +133,19 @@ def query_prometheus_metric(expr: str) -> str:
       invent names, never prefix service names (`http_requests_total`, not `payment_...`)
     - brackets must balance; every rate()/increase() MUST include a range selector
       (e.g. [5m]) — rate(x[5m]) is valid, rate(x) is rejected
-    - pool/db metrics use db='postgres_primary' (NOT service=); request metrics use
-      service='payment_gateway' and label status_code for non-200 diagnosis
-      (e.g. http_requests_total{service="payment_gateway",status_code="429"})
+    - label conventions differ per environment — call list_metrics(service) for the
+      exact label names this environment uses; never guess labels
 
     Returns the scalar value, or a structured ERROR explaining what to fix.
     On ERROR: call list_metrics(service) before retrying.
     """
     valid, err = validate_expr(expr)
     if not valid:
-        return f"ERROR: {err}. Allowed metrics: {list(METRIC_CATALOG.keys())}. Convention: generic names + labels (e.g. db='postgres_primary'). Never use service prefixes."
+        return f"ERROR: {err}. Allowed metrics: {list(METRIC_CATALOG.keys())}. Call list_metrics(service) for this environment's label conventions. Never use service prefixes."
     try:
         val = _cached_read(f"metric:{expr}", lambda: _instant_query(expr))
         if val is None:
-            return f"ERROR: Query '{expr}' returned no data. Use exact metric from list_metrics and verify labels (e.g. db='postgres_primary', not service=)."
+            return f"ERROR: Query '{expr}' returned no data. Use exact metric from list_metrics and verify the labels this environment uses (list_metrics lists them)."
         return f"{val}"
     except Exception as e:
         return f"query failed: {e}"
@@ -225,9 +224,8 @@ def list_metrics(service: str) -> str:
 
     Use as a FALLBACK whenever query_prometheus_metric errors with 'Unknown metric'
     or 'returned no data' — this lists what actually exists in the sim cluster.
-    Also returns METRIC_LABEL_NOTES: the label gotchas (e.g. pool metrics are keyed by
-    db='postgres_primary', card_rails appears only under circuit_breaker_state while
-    most metrics use service=...) that cause most rejected queries.
+    Also returns the label gotchas for this service's environment that cause
+    most rejected queries.
     Returns 'no curated queries for <service>' for services that are not scraped.
     """
     try:
@@ -240,6 +238,7 @@ def list_metrics(service: str) -> str:
     except Exception:
         live = None  # fall through to verified static map
 
+    notes = label_notes_for(service)
     known = SERVICE_METRICS.get(service, [])
     if live is not None:
         header = f"Live metric families in Prometheus: {', '.join(sorted(set(live)))}"
@@ -249,12 +248,12 @@ def list_metrics(service: str) -> str:
         return (
             f"{header}\n"
             f"Exact PromQL for {service}: {', '.join(known)}\n"
-            f"{METRIC_LABEL_NOTES}"
+            f"{notes}"
         )
     return (
         f"{header}\n"
         f"No curated queries for '{service}'  it may not be a scraped service "
-        f"(scraped: {', '.join(sorted(SERVICE_METRICS))}). {METRIC_LABEL_NOTES}"
+        f"(scraped: {', '.join(sorted(SERVICE_METRICS))}). {notes}"
     )
 
 @tool
@@ -289,7 +288,8 @@ def propose_remediation(action: str, tool: str, target_service: str, blast_radiu
         blast_radius: 'pod' | 'service' | 'cluster' (your honest estimate of impact scope).
         flag: for set_feature_flag ONLY — the feature-flag key your evidence names
             (e.g. from feature_flag_evaluation_success_total{feature_flag_key=...}).
-        variant: for set_feature_flag ONLY — the variant to restore (usually 'off').
+        variant: for set_feature_flag ONLY — the variant to restore, named from your
+            evidence (e.g. the last healthy variant the flag metric shows).
 
     The proposal is validated by a critic (grounding + policy) before any execution.
     """
@@ -300,7 +300,8 @@ def propose_remediation(action: str, tool: str, target_service: str, blast_radiu
         return ("REJECTED: set_feature_flag needs the flag key and the variant to restore, "
                 "named from your evidence (e.g. flag='<key your metric evidence names>', "
                 "variant='<the healthy variant it stopped evaluating to>'). "
-                "Look at feature_flag_evaluation_success_total labels or list_metrics before proposing.")
+                "Look at feature_flag_evaluation_success_total labels or list_metrics before proposing. "
+                "Never guess a flag name or variant.")
     return "proposal recorded, investigation ended."
 
 
