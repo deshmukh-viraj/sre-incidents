@@ -124,12 +124,11 @@ Guidelines:
 {facts_guideline}"""
 
     try:
-        result = structured_invoke(CommunicatorOutput, [HumanMessage(content=prompt)],
-                                   temperature=0.1, simple=True,
-                                   llm=_get_llm(temperature=0.1, simple=True))
+        result = _get_llm(temperature=0.1, simple=True).with_structured_output(
+            CommunicatorOutput, include_raw=True).invoke([HumanMessage(content=prompt)])
         resp, raw_msg = result["parsed"], result["raw"]
 
-        usage = result["usage"] or {}
+        usage = raw_msg.usage_metadata or raw_msg.response_metadata.get("token_usage", {})
         input_tokens = usage.get("input_tokens", 0) or 0
         output_tokens = usage.get("output_tokens", 0) or 0
         cost = calculate_cost(input_tokens, output_tokens)
