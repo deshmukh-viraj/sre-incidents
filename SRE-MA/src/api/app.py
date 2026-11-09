@@ -3,6 +3,11 @@ api/app.py
 --------------
 fastapi app. handles http, runs the graph, keeps track of incidents.
 """
+import os
+# before any langfuse import: the SDK derives the otel service name from this env
+# var at import time; unset it means every trace lands as 'unknown_service:python'
+os.environ.setdefault("OTEL_SERVICE_NAME", "sre-incident-agent")
+
 import uuid
 import datetime
 import traceback

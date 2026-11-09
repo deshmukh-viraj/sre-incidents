@@ -128,6 +128,12 @@ def log_incident_run(
     else:
         escalation_class = "escalated_without_evidence"
 
+    # tool calls that returned an error/skip/unavailable — surfaced so an
+    # all-tools-down run is visible in trace filters instead of reading as clean
+    tool_results = [t.get("result", "") for t in (result.get("tool_invocations") or [])]
+    tool_error_count = sum(1 for r in tool_results
+                           if str(r).startswith(("ERROR", "SKIP", "signal unavailable")))
+
     #log ERROR/WARNING for escalations
     if escalation_class == "escalated_without_evidence":
         client.log_level = "ERROR"
@@ -193,6 +199,8 @@ def log_incident_run(
                 "escalation_class": escalation_class,
                 "token_cost_usd": cost_usd,
                 "total_tokens_used": result.get("total_tokens_used", 0),
+                "tool_calls": len(tool_results),
+                "tool_errors": tool_error_count,
             },
         )
         #set trace-level user, session, tags
