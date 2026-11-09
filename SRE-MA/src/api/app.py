@@ -486,6 +486,11 @@ async def alertmanager_webhook(
         labels = alert.labels or {}
         annots = alert.annotations or {}
 
+        # remediation answer, if rule drift re-adds such labels, don't relay them to the agent.
+        blocklist = {s.strip() for s in os.getenv(
+            "ALERT_LABEL_BLOCKLIST", "remote_flag,remote_variant").split(",") if s.strip()}
+        labels = {k: v for k, v in labels.items() if k not in blocklist}
+
         alert_name = labels.get('alertname', 'unknown-alert')
         service = labels.get('service') or infer_service(alert_name)
 
@@ -555,7 +560,7 @@ async def alertmanager_webhook(
                 "alert_name": alert_name, 
                 "received_at": _utcnow().isoformat(),
             })
-            print(f"[api] Correlated {alert_name} -> existing incident {corr_incident_id} (not spawning, new run)")
+            print(f"[api] Correlated {alert_name} -> existing incident {corr_incident_id} (correlated; not spawning a new run)")
 
             # a re-fire is still a re-fire even if we fold it into an open incident
             if pending_revoke_id:
@@ -687,7 +692,7 @@ async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, r
         if trace_id:
             log_human_feedback(trace_id=trace_id, approved=req.approved, notes=req.notes, approver=req.approver)
 
-        # P7: canonical HITL resume — the node's interrupt() receives the
+        #canonical HITL resume the node's interrupt() receives the
         # decision directly via Command(resume=...); human_gate_node writes
         # human_approved/approved_by itself (no update_state re-invoke dance).
         resume_payload = {"approved": req.approved, "approver": req.approver}
