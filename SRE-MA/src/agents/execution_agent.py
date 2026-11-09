@@ -46,9 +46,12 @@ def _recovery_checker_enabled() -> bool:
 
 
 def log_stage(incident_id: str, stage: str, detail: str = ""):
-    """clean stage logger for real-time visibility."""
+    """clean stage logger for real-time terminal visibility.
+    flush=True: block-buffered stdout once froze a live run at poll 6/14 for
+    102 min (INC-OTelUs-C830 postmortem) — stage lines are the heartbeat and
+    must never sit in the buffer."""
     suffix = f" | {detail}" if detail else ""
-    print(f"\n[{incident_id}] ▶ {stage}{suffix}")
+    print(f"\n[{incident_id}] ▶ {stage}{suffix}", flush=True)
 
 
 def _executor_receipts_enabled() -> bool:
@@ -72,7 +75,7 @@ def human_gate_node(state: AgentState) -> dict:
     """
     incident_id = state['incident_id']
 
-    # B7 handoff transfer (before the normal approval check)
+    #handoff transfer (before the normal approval check)
     handoff = os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("HANDOFF_ENABLED", "0") == "1"
     pkg = state.get("handoff_to_human") or {}
@@ -107,11 +110,10 @@ def human_gate_node(state: AgentState) -> dict:
         log_stage(incident_id, "HUMAN_GATE", f"auto-approved (requires_approval={needs_approval})")
         return {"human_approved": True, "approval_timeout": False}
 
-    # natural-calm soak (INC-Paymen-9023): a transient spike can recover while the
+    # natural-calm soak a transient spike can recover while the
     # pipeline investigates; paging a human for an alert that already calmed is a
-    # false page. SEV2/SEV3 only (SEV1 pages immediately), fresh live signals,
-    # bounded soak. ponytail: fixed 20s poll + NATURAL_CALM_SOAK_S cap (default
-    # 120s) — upgrade path: alertmanager silence API instead of polling.
+    # false page. SEV2/SEV3 only (SEV1 pages immediately)
+    #fixed 20s poll + NATURAL_CALM_SOAK_S cap
     soak = int(os.getenv("NATURAL_CALM_SOAK_S", "120") or 0)
     if soak > 0 and state.get("severity") in ("SEV2", "SEV3"):
         from src.agents.deep_investigation import _breaches
@@ -277,7 +279,10 @@ def _verify_recovery(
             consecutive_healthy = 0
             first_healthy_ts = None
 
-        log_stage(alert_name, "POLL_WAIT", f"metrics not stable, waiting {interval}s...")
+        wait_reason = ("metrics backend returned nodata , waiting"
+                       if curr_p99 is None and curr_error is None
+                       else "metrics not stable, waiting")
+        log_stage(alert_name, "POLL_WAIT", f"{wait_reason} {interval}s...")
         time.sleep(interval)
 
     log_stage(alert_name, "VERIFICATION_EXHAUSTED", f"exhausted {polls} polls — no recovery")
