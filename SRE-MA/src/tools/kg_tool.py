@@ -69,8 +69,24 @@ METRIC_LABEL_NOTES = (
 )
 
 try:
+    import logging
+    import warnings
     from neo4j import GraphDatabase
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    try:
+        from neo4j.warnings import Neo4jWarning
+        warnings.filterwarnings("ignore", category=Neo4jWarning)
+    except Exception:
+        pass
+    logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+
+    try:
+        driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+            notifications_min_severity="OFF",
+        )
+    except TypeError:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 except Exception as e:
     print(f"[kg_tool] WARNING: Could not connect to Neo4j: {e}")
     driver = None
@@ -118,15 +134,21 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
                 #past incidents
                 if alert_name:
                     past_q = (
-                    "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) "
-                    "WHERE p.success = true AND p.service = $service "
-                    "RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, "
-                    "p.business_mttr_seconds AS business_mttr_seconds, "
-                    "p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
+                        "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert {name: $alert_name}) "
+                        "WHERE p.success = true "
+                        "RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, "
+                        "coalesce(p.business_mttr_seconds, p.mttr_seconds, 0) AS business_mttr_seconds, "
+                        "p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
                     )
-                    past_result = session.run(past_q, alert_name=alert_name, service=service)
+                    past_result = session.run(past_q, alert_name=alert_name)
                 else:
-                    past_q = "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert)-[:AFFECTS]->(s:Service {name: $service}) WHERE p.success = true RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, p.business_mttr_seconds AS business_mttr_seconds, p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
+                    past_q = (
+                        "MATCH (p:PastIncident)-[:TRIGGERED_BY]->(a:Alert)-[:AFFECTS]->(s:Service {name: $service}) "
+                        "WHERE p.success = true "
+                        "RETURN p.root_cause AS root_cause, p.action_taken AS action_taken, "
+                        "coalesce(p.business_mttr_seconds, p.mttr_seconds, 0) AS business_mttr_seconds, "
+                        "p.success AS success ORDER BY p.timestamp DESC LIMIT 1"
+                    )
                     past_result = session.run(past_q, service=service)
                 
                 records = [dict(r) for r in past_result]    
