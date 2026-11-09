@@ -53,8 +53,16 @@ def set_flag(flag: str, variant: str) -> dict:
     if not flag or not variant:
         return {"success": False, "error": "flag and variant are required"}
     try:
+        ssh_argv = ["ssh"]
+        # in-container bridge (aws-tunnel): no ~/.ssh/config exists there
+        # compose passes an explicit key path; the alias 'otel-demo' only
+        # resolves when running from a host with a real ssh config
+        key = os.getenv("SSH_KEY")
+        if key:
+            ssh_argv += ["-i", key, "-o", "StrictHostKeyChecking=accept-new"]
+        ssh_argv += [SSH_TARGET, "python3", "-", FLAGS_PATH, flag, variant]
         proc = subprocess.run(
-            ["ssh", SSH_TARGET, "python3", "-", FLAGS_PATH, flag, variant],
+            ssh_argv,
             input=_REMOTE, capture_output=True, text=True, timeout=30,
         )
     except Exception as e:
