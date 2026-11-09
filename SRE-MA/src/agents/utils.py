@@ -53,14 +53,13 @@ def _accumulate_usage(messages: list) -> tuple[int, int]:
     return total_input, total_output
 
 
-def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str = None, is_groq: bool = False, is_nvidia: bool = False, simple: bool = False):
-    timeout = 30 if simple else 120
+def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str = None, is_groq: bool = False, is_nvidia: bool = False):
     if is_groq:
-        return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=0, streaming=True, timeout=timeout)
+        return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=0)
     elif is_nvidia:
         return ChatNVIDIA(model=model_name, temperature=temperature, api_key=api_key, base_url=base_url)
 
-    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, stream_usage=True, streaming=True, timeout=timeout, model_kwargs={"thinking": "disabled" if simple else "enabled"})
+    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url )
 
 
 def _get_llm(temperature: float = 0.1, simple: bool = False):
@@ -70,32 +69,23 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
     groq_key = os.getenv("GROQ_API_KEY")
     nvidia_key = os.getenv("NVIDIA_API_KEY")
     cc_key = os.getenv("CODECRAFT_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL") or openrouter_base
+    base_url = os.getenv("base_url") or openrouter_base
     primary_model_cc = os.getenv("LLM_MODEL_CC", "deepseek-v4-flash-0731")
 
     models = []
-    if nvidia_key:
-        models.append(_create_llm(
-            os.getenv("LLM_MODEL_NVIDIA", "nvidia/nemotron-3-ultra-550b-a55b"),
-            temperature, nvidia_key, is_nvidia=True, simple=simple))
     if cc_key:
-        models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, simple=simple))
+        models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, is_groq=False, is_nvidia=False))
     if openrouter_key:
-        models.append(_create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False, simple=simple))
+        models.append(_create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False))
+    if nvidia_key:
+        models.append(_create_llm(os.getenv("LLM_MODEL_NVIDIA"), temperature, nvidia_key, is_nvidia=True))
     if groq_key:
-        models.append(_create_llm(os.getenv("MODEL_GROQ"), temperature, groq_key, is_groq=True, simple=simple))
+        models.append(_create_llm(os.getenv("MODEL_GROQ"), temperature, groq_key, is_groq=True))
     if not models:
-        return _create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False, simple=simple)
+        return _create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False)
 
     primary = models[0]
     return primary
-
-# ponytail: removed the P9 invoke_structured_chain fallback wrapper chain (2026-10-29) —
-# every caller now uses langchain's llm.with_structured_output() directly.
-# Ceiling: no cross-provider retry when the primary providers fail to produce
-# structured output; each agent's own except block (fail-open paths in verifier/
-# diagnoser/communicator) is the last resort. Upgrade path: a simple retry loop
-# around with_structured_output at the call sites that need it.
 
 
 def structured_invoke(schema, messages, temperature: float = 0.1, simple: bool = False,
