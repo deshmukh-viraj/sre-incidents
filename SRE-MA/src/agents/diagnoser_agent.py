@@ -247,9 +247,8 @@ Diagnose this incident. Return JSON ONLY.
 """
 
     try:
-        result = structured_invoke(DiagnoserOutput,
-                                   [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)],
-                                   llm=llm)
+        result = llm.with_structured_output(DiagnoserOutput, include_raw=True).invoke(
+            [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
         resp, raw_msg = result["parsed"], result["raw"]
 
         hypotheses = [h.model_dump() for h in resp.hypotheses]
