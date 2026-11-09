@@ -1,6 +1,80 @@
 # Changelog
 
-All notable changes to SRE-MA. Dates are 2026-11-03 (v2 integration) and 2026-11-04 (live validation).
+All notable changes to SRE-MA. Dates are 2026-11-03 (v2 integration), 2026-11-04 (live validation) and 2026-11-09 (post-mortem hardening).
+
+## [2026-11-09] — post-mortem hardening: act-rule gates, evidence hygiene, tracing (feature/v2-refactor)
+
+Fixes the seven failure modes from the cartFailure run post-mortem (GOAL_RECALL.md).
+Golden regenerated for the one sanctioned label change (blast pod→service).
+
+### Act-rule gates (FM1 — unverified SEV1 change ran with no approval)
+- `policy_validator_node` enforces the goal's autonomy rule additively:
+  - **Tier gate** — targets are looked up in a per-environment `service_catalog`
+    (config/environments.yaml): `stateless_app` auto-eligible,
+    `stateful_data`/`monitoring` always human gate, **missing from the catalog =
+    human gate**. Catches e.g. RB-002's rolling restart on `account_ledger`,
+    which previously auto-executed.
+  - **Citation gate** — LLM (`deep_agents`) diagnoses must cite ≥2 evidence
+    lines implicating the action target; the post-mortem's all-telemetry-empty
+    investigation now human-gates instead of executing.
+  - **Verifier gate** — a diagnosis the adversarial verifier did NOT uphold
+    (unverifiable/ungrounded, or contradicted after the reroute cap) never
+    auto-executes; it goes to the human gate with the plan prepared.
+- `requires_human_approval` no longer blanket-gates every service-blast action;
+  autonomy-eligible action types (flag flips, single-service restarts,
+  informational ops) pass to the policy tier gate. `kubectl_scale`/`rollback`/
+  patches still gate. Blast radius for feature-flag flips is honestly
+  `service` (a global flag change was labeled `pod`), pinned line in
+  test_routing.py updated with approval; RB-001 runbook label fixed likewise.
+- Self-check: `check_act_gates.py` replays the post-mortem (empty telemetry +
+  unverifiable verifier → human gate) and the healthy path (grounded + cited
+  flag flip on a stateless tier → autonomous).
+
+### Environment-correct tooling (FM2 — metrics tools pointed at the wrong system)
+- `SERVICE_METRICS` gains curated PromQL for the otel-demo services
+  (frontend/cart/checkout/payment/... on `service_name` labels), so
+  `list_metrics`' static fallback and the KG's [Metrics] sections stop handing
+  the agent fintech-sim queries (`card_rails`, `db="postgres_primary"`).
+- Label gotchas split per environment (`label_notes_for(service)`): otel
+  services see `service_name`/`http_response_status_code`/rpc conventions,
+  fintech services see theirs. Tool error text no longer hardcodes fintech
+  label examples.
+
+### Answer hygiene (FM3)
+- `propose_remediation` no longer leaks the answer: the docstring's
+  "(usually 'off')" and the rejection message's `flag='cartFailure',
+  variant='off'` example are gone — the LLM must name flag and variant from
+  its own evidence.
+
+### Reroute economics (FM4 — duplicate second investigation, ~75s + half the cost)
+- The verifier reroutes only on a **grounded** non-upheld verdict; ungrounded
+  results cannot be re-ground by re-running the same backends.
+- A verifier reroute now inherits the per-run read cache (recorded results +
+  duplicate suppression) and injects the VERIFIER CHALLENGE (verdict, reason,
+  failed disproof queries) into the investigation context, so pass 2 adds new
+  evidence instead of repeating queries.
+
+### Cost (FM5)
+- Verifier LLM calls run with thinking disabled (`simple=True`): a 38s,
+  4,975-hidden-reasoning-token verdict call that returned a blank reason was
+  cost without information. test_verifier fake signature extended (fakes only).
+
+### Evidence hygiene (FM6)
+- The finding is no longer written into its own evidence list (it lives in
+  hypothesis/root_cause); evidence = observations only.
+- Terminal receipts ("proposal recorded, investigation ended.") are excluded
+  from `_tool_evidence`, the investigation scratchpad, and the critic's
+  citations — they no longer count as tool-result grounding.
+- Truncation caps raised (selector 120, result value 160) so evidence lines
+  survive with their values.
+
+### Tracing (FM7)
+- `OTEL_SERVICE_NAME=sre-incident-agent` set in app.py before any langfuse
+  import (traces no longer read `unknown_service:python`).
+- Deep-investigation span named via `run_name` (was `ChatOpenAI`).
+- Trace metadata now carries `tool_calls`/`tool_errors` counts so an
+  all-tools-down run is visible in filters instead of reading as clean.
+
 
 ## [2026-11-04] — v2-refactor integration + live otel-demo validation (feature/v2-refactor)
 
