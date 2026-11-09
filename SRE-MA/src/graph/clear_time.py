@@ -194,7 +194,11 @@ def build_clear_evidence(
     a_start = _to_unix(t_action_start)
     a_end = _to_unix(t_action_end)
 
-    samples = fetch(expr, a_start - pre_window_sec, _to_unix(t_now), step, **fetch_kwargs)
+    try:
+        samples = fetch(expr, a_start - pre_window_sec, _to_unix(t_now), step, **fetch_kwargs)
+    except Exception as e:
+        print(f"[clear_time] metrics fetch failed ({e}); degrading to polled evidence")
+        samples = []
 
     #in simulation prometheus has no range history; fall back to polled timestamp
     #if range query is empty, inherit the healthy_run_len verified during live polling.
