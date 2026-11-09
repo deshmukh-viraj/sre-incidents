@@ -74,6 +74,17 @@ def get_backend(kind: str) -> Optional[Any]:
     return backend
 
 
+def service_tier(service: str) -> Optional[str]:
+    """tier for a service from the active environment's service_catalog
+    (stateless_app | stateful_data | monitoring). None = not in the catalog,
+    which per the act-rule defaults to the human gate."""
+    try:
+        pack = _load_pack(active_environment())
+        return (pack.get("service_catalog") or {}).get(service)
+    except Exception:
+        return None
+
+
 def reset_cache():
     """drop cached instances (used by tests and after config changes)."""
     _BACKEND_CACHE.clear()

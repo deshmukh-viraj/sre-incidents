@@ -537,7 +537,9 @@ def classify_blast_radius(action: dict) -> str:
             return "cluster"
         return "service"
     if "feature_flag" in tool:
-        return "pod"
+        # a flag flip is environment-wide config, not a single pod (run postmortem:
+        # a global flag change was labeled blast=pod)
+        return "service"
     if "flush_cache" in tool:
         return "pod"
     if "kill_query" in tool:
@@ -546,23 +548,32 @@ def classify_blast_radius(action: dict) -> str:
     return "service"
 
 
+# action types that may run autonomously once the policy tier gate passes them
+# (goal act-rule: feature-flag flips and single-service restarts; informational
+# ops stay autonomous too — everything else starts at the human gate)
+AUTONOMOUS_ACTION_TOOLS = {
+    "set_feature_flag",
+    "rolling_restart",
+    "kubectl_restart_deployment",
+    "capture_diagnostics",
+    "notify",
+}
+
 def requires_human_approval(action: dict) -> bool:
     """
-    hardcoded rule to decide if we need a human.
-    blast_radius=cluster -> yes
-    reversible=False -> yes
-    blast_radius=service -> yes (unless we say otherwise)
+    coarse pre-gate: cluster blast or unknown reversibility always needs a human,
+    and only autonomy-eligible action types may pass. service-blast actions using
+    an eligible tool are NOT blanket-gated here — the policy validator's tier gate
+    (service catalog) makes the final call; gating every service-level action
+    would contradict the autonomy rule (stateless app restarts are auto-eligible).
     """
     blast = classify_blast_radius(action)
     reversible = action.get("reversible", True)
-
     if blast == "cluster":
         return True
     if not reversible:
         return True
-    if blast == "service":
-        return True
-    return False
+    return action.get("tool") not in AUTONOMOUS_ACTION_TOOLS
 
 
 #infer service name

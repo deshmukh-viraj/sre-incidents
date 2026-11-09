@@ -8,7 +8,7 @@
         "value": true,
         "service": "payment_gateway"
       },
-      "blast_radius": "pod",
+      "blast_radius": "service",
       "reversible": true,
       "requires_approval": false,
       "executed": false,

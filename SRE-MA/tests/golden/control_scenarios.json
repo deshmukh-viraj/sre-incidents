@@ -221,7 +221,7 @@
         "action_plan": [
           {
             "action": "Enable card_rails request queuing",
-            "blast_radius": "pod",
+            "blast_radius": "service",
             "executed": false,
             "params": {
               "flag": "card_rails_queue_enabled",

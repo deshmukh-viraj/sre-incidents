@@ -117,7 +117,7 @@ def test_cluster_and_irreversible_need_human():
 
 
 def test_blast_radius_classification():
-    assert classify_blast_radius({"tool": "set_feature_flag", "params": {}}) == "pod"
+    assert classify_blast_radius({"tool": "set_feature_flag", "params": {}}) == "service"
     assert classify_blast_radius({"tool": "rolling_restart", "params": {"service": "payment_gateway"}}) == "service"
     assert classify_blast_radius({"tool": "rolling_restart", "params": {"service": "postgres_primary"}}) == "cluster"
 

@@ -4,6 +4,22 @@
 # swap an endpoint or add an environment here — never in graph nodes or prompts.
 
 fintech_sim:
+  # service tiers: one catalog entry per service — new services need a line
+  # here, not code. stateless_app = auto-eligible, stateful_data/monitoring =
+  # always human gate; a service missing from the catalog defaults to the gate.
+  service_catalog:
+    payment_gateway: stateless_app
+    api_gateway: stateless_app
+    kyc_service: stateless_app
+    fraud_detector: stateless_app
+    notification_service: stateless_app
+    account_ledger: stateful_data
+    postgres_primary: stateful_data
+    postgres_replica: stateful_data
+    mongodb: stateful_data
+    redis: stateful_data
+    kafka: stateful_data
+    card_rails: stateful_data
   # fintech-sre-sim compose stack (sim-network or port-forwards)
   metrics:
     adapter: prometheus
@@ -20,6 +36,27 @@ fintech_sim:
 
 sandbox:
   # otel demo stack on EC2, reached through the SSH tunnels from the runbook:
+  service_catalog:
+    frontend: stateless_app
+    cart: stateless_app
+    checkout: stateless_app
+    payment: stateless_app
+    email: stateless_app
+    shipping: stateless_app
+    currency: stateless_app
+    ad: stateless_app
+    product-catalog: stateless_app
+    recommendation: stateless_app
+    quote: stateless_app
+    valkey-cart: stateful_data
+    kafka: stateful_data
+    flagd: monitoring
+    load-generator: monitoring
+    prometheus: monitoring
+    grafana: monitoring
+    jaeger: monitoring
+    tempo: monitoring
+    opensearch: monitoring
   # -L 9091:localhost:9090 (prometheus), -L 3200:localhost:3200 (tempo)
   metrics:
     adapter: prometheus
