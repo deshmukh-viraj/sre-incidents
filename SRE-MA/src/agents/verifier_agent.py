@@ -7,11 +7,15 @@ and critic. Flag VERIFIER_ENABLED (default 0; MULTI_AGENT=1 enables all upgrades
 - read-only tools ONLY, dispatched through the Tool Librarian (dispatcher.run_tool)
 - hard recursion cap: VERIFIER_RECURSION_LIMIT disproof-query executions per check
 - typed VerificationChallenge {claim, disproof_queries[], verdict, confidence}
-- contradicted+grounded OR unverifiable -> route back to deep_investigation ONCE
-  (cap 1; unverifiable reroute lets the investigation re-ground its diagnosis,
-  otherwise erroring "proof" queries silently buy zero information)
+- reroute back to deep_investigation ONCE only when the check is GROUNDED
+  (contradicted or unverifiable WITH live results): re-running the same backends
+  cannot re-ground a check whose queries returned nothing, so an ungrounded
+  challenge goes straight to the critic, whose policy gate routes it to the
+  human gate instead of burning a second identical investigation
 - fail-open: any error -> unverifiable verdict, routing falls back to critic
   (the pre-change target)
+- verdict calls run with thinking disabled (simple=True): a 38s/6k-token hidden-
+  reasoning call that returns a blank reason is cost without information
 
 This node does NOT re-implement critic grounding (whitelist/target-binding
 checks live in critic_agent.py) and does NOT touch kg_tool Gate-5 logic — its
@@ -104,7 +108,7 @@ def verifier_node(state: AgentState) -> dict:
                                     "disproof_queries": [], "confidence": 0.0,
                                     "reason": "no claim to verify (fail-open)"}}
 
-    llm = _get_llm(temperature=0.0)
+    llm = _get_llm(temperature=0.0, simple=True)
     evidence = _evidence_of(state)
 
     invocations, ledger = [], []
@@ -177,8 +181,10 @@ def verifier_node(state: AgentState) -> dict:
     res["reason"] = getattr(challenge, "reason", None)
 
     reroutes_now = int(state.get("verifier_reroutes", 0) or 0)
-    route_back = reroutes_now < 1 and (
-        (res["verdict"] == "contradicted" and grounded) or res["verdict"] == "unverifiable")
+    # reroute only on a GROUNDED non-upheld verdict: with no live results, a second
+    # investigation repeats the same failing queries (measured ~75s + half the run
+    # cost for zero new evidence); the policy gate sends it to a human instead.
+    route_back = reroutes_now < 1 and grounded and res["verdict"] in ("contradicted", "unverifiable")
     # the router reads the marker (not the counter): the counter already includes
     # this reroute, so a bare counter comparison would dead-lock the second pass
     res["reroute"] = route_back
@@ -201,8 +207,10 @@ def verifier_node(state: AgentState) -> dict:
 
 
 def route_after_verifier(state: AgentState):
-    """verdict routing: contradicted+grounded or unverified returns to deep_investigation
-    exactly once (cap 1); contradicted but ungraounded, upheld and every second pass fall back to the
+    """verdict routing: a GROUNDED contradicted/unverifiable verdict returns to
+    deep_investigation exactly once (cap 1); ungrounded results cannot be re-ground
+    by re-running the same backends, so they fall to the critic (whose policy gate
+    routes them to the human gate); upheld and every second pass fall back to the
     pre-change target, critic."""
     res = state.get("verifier_result") or {}
     if res.get("reroute") is True:

@@ -54,7 +54,7 @@ def _fake_llm(monkeypatch, first, second=None, raise_on=None):
         def with_structured_output(self, schema, include_raw=False):
             return FakeStructured()
 
-    monkeypatch.setattr("src.agents.verifier_agent._get_llm", lambda temperature=0.0: FakeLLM())
+    monkeypatch.setattr("src.agents.verifier_agent._get_llm", lambda temperature=0.0, simple=False: FakeLLM())
 
 
 def test_flag_off_is_noop(monkeypatch):
