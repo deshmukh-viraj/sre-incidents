@@ -35,8 +35,6 @@ _APP_METRIC_PREFIXES = (
 
 # labels/notes for the remote OTel demo stack (AWS) vs the fintech sim:
 # server-side HTTP metrics use service_name (not service=) and
-# http_response_status_code (not status_code); gRPC is rpc_server_/rpc_client_
-# with rpc_response_status_code (OK | INTERNAL | UNAVAILABLE ...).
 OTEL_DEMO_CATALOG = {
     "http_server_request_duration_seconds": "{service_name,http_route,http_response_status_code} (hist/cnt)",
     "http_client_request_duration_seconds": "{service_name,server_address,http_response_status_code} (hist/cnt)",
@@ -276,6 +274,9 @@ def propose_remediation(action: str, tool: str, target_service: str, blast_radiu
     Args:
         action: full free-text diagnosis + fix rationale (evidence incl. the numbers
             you observed; keep the raw-signal numbers coherent with the live values).
+            This text is also the human's record of what was done and why — state
+            the diagnosis, the fix, its expected effect, and what to watch after
+            it lands (same readability as an escalation reason).
         tool: MUST be one of the whitelisted write tools:
             'set_feature_flag', 'rollback_deployment', 'rolling_restart',
             'capture_diagnostics', 'notify', 'execute_kg_suggestion',
@@ -297,7 +298,8 @@ def propose_remediation(action: str, tool: str, target_service: str, blast_radiu
                 f"Call propose_remediation again with tool set to one of: {sorted(ALLOWED_WRITE_TOOLS)}")
     if tool == "set_feature_flag" and (not flag or not variant):
         return ("REJECTED: set_feature_flag needs the flag key and the variant to restore, "
-                "named from your evidence (e.g. flag='cartFailure', variant='off'). "
+                "named from your evidence (e.g. flag='<key your metric evidence names>', "
+                "variant='<the healthy variant it stopped evaluating to>'). "
                 "Look at feature_flag_evaluation_success_total labels or list_metrics before proposing.")
     return "proposal recorded, investigation ended."
 
