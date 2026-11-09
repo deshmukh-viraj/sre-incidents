@@ -115,24 +115,38 @@ def _cache_key(tool_name: str, args: dict) -> str:
     return f"{tool_name}: {hash(frozenset(args.items()))}"
 
 
+def _terminal_call_ids(msgs) -> set:
+    """tool_call ids of the terminal tools, so their receipts can be kept out of
+    the scratchpad (they would otherwise count as 'tool results' in the critic's
+    grounding check without proving anything)."""
+    return {tc.get("id") for m in msgs
+            for tc in (getattr(m, "tool_calls", None) or [])
+            if (tc.get("name") or "") in ("propose_remediation", "escalate_with_reason")}
+
+
 def _tool_evidence(msgs, cap: int = 6) -> list:
-    """pair tool results with the query that produced them, most recent last."""
+    """pair tool results with the query that produced them, most recent last.
+    terminal receipts (propose_remediation/escalate_with_reason responses) are
+    not evidence — 'proposal recorded, investigation ended.' proved nothing."""
+    terminal = {"propose_remediation", "escalate_with_reason"}
     queries, out = {}, []
     for m in msgs:
         for tc in (getattr(m, "tool_calls", None) or []):
             a = tc.get("args") or {}
             queries[tc.get("id")] = (tc.get("name") or "", str(a.get("expr") or a.get("query") or ""))
         if getattr(m, "type", "") == "tool" and getattr(m, "tool_call_id", None) in queries:
-            _, expr = queries[m.tool_call_id]
+            name, expr = queries[m.tool_call_id]
+            if name in terminal:
+                continue
             # cite the metric + labels, not the wrapping function: 'sum -> 0.012'
             # told the critic nothing; metric{labels} is what it must verify
             ref = re.search(r"[a-zA-Z_][a-zA-Z0-9_]*(?=\{)", expr)
             if ref:
                 end = expr.find("}", ref.end())
-                short = expr[ref.start(): end + 1][:80] if end != -1 else expr[ref.start():][:80]
+                short = expr[ref.start(): end + 1][:120] if end != -1 else expr[ref.start():][:120]
             else:
                 short = expr.split("(", 1)[0][:60] or "tool"
-            out.append(f"{short} -> {str(m.content)[:60]}")
+            out.append(f"{short} -> {str(m.content)[:160]}")
     return out[-cap:]
 
 
@@ -161,9 +175,9 @@ def _structured_writeback(state, base_return, proposal, terminal, text_escalated
         for key, thr in _BREACH_CHECKS if s.get(key) is not None
     ][:4]
     # finding lives in root_cause/diagnosis_summary/hypothesis already;
-    # evidence_summary carries only observations (P1 dedupe)
+    # evidence carries only observations (P1 dedupe) — a claim is not its own evidence
     ev_core = breaches + _tool_evidence(msgs)
-    evidence = ev_core + [finding]
+    evidence = ev_core
 
     return {**base_return,
         "hypotheses": [{"hypothesis": finding, "evidence": evidence,
@@ -194,7 +208,12 @@ def deep_investigation_node(state) -> dict:
     print(f"[deep_investigation] Alert: {state.get('alert_name')} | Severity: {state.get('severity')}")
     print(f"[deep_investigation] Services: {state.get('affected_services')}")
 
-    reset_investigation_cache()
+    # a verifier reroute continues the SAME investigation: keep the per-run read
+    # cache so pass 2 sees recorded results + duplicate-suppression instead of
+    # re-running identical queries (measured: ~75s + half the run cost, zero new
+    # evidence). fresh incidents and critic re-investigations reset it.
+    if not state.get("verifier_reroutes"):
+        reset_investigation_cache()
     tool_call_cache = {}
 
     raw = state.get("raw_signals", {})
@@ -243,18 +262,32 @@ def deep_investigation_node(state) -> dict:
     if state.get("requires_retry") and state.get("critique"):
         critique_hint = f"\nCRITIC REJECTION (fix this): {state['critique']}\n"
 
+    #on a verifier reroute, the challenge tells the investigator what did not survive
+    #adversarial checking — the reroute must add NEW evidence, not repeat the queries
+    #the verifier already ran (they are cached and will answer as duplicates)
+    verifier_hint = ""
+    vr = state.get("verifier_result") or {}
+    if state.get("verifier_reroutes") and vr.get("verdict") != "upheld":
+        verifier_hint = (
+            f"\nVERIFIER CHALLENGE: your diagnosis did not survive adversarial checking "
+            f"(verdict={vr.get('verdict')}, reason={vr.get('reason')}). Disproof queries "
+            f"already run: {vr.get('disproof_queries') or 'none executed'}. Re-ground the "
+            f"diagnosis with DIFFERENT evidence — do not repeat those queries.\n"
+        )
+
     ctx = (
         f"ALERT: {state.get('alert_name')} | SEVERITY: {state.get('severity')}\n"
         f"SERVICES: {', '.join(all_services)} (primary: {primary_service})\n"
         f"ROUNDS REMAINING: {max_rounds}\n"
         f"LOGS AVAILABLE: {logs_ok}\n"
-        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
+        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{verifier_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
     )
 
     try:
         result = get_harness().invoke(
             {"messages": [SystemMessage(content=formatted_prompt), HumanMessage(content=ctx)]},
-            config={"recursion_limit": 2 * max_rounds + 2}
+            # run_name names the trace observation (else every model call reads ChatOpenAI)
+            config={"recursion_limit": 2 * max_rounds + 2, "run_name": "deep-investigation"}
         )
     except Exception as e:
         print(f"[deep_investigation] ERROR: {e}")
@@ -334,6 +367,8 @@ def deep_investigation_node(state) -> dict:
     base_return = {
         "investigation_scratchpad": [
             f"{m.type}: {str(m.content)[:200]}" for m in msgs
+            if not (getattr(m, "type", "") == "tool"
+                    and getattr(m, "tool_call_id", None) in _terminal_call_ids(msgs))
         ],
         "investigation_steps": sum(1 for m in msgs if m.type == "ai"),
         "diagnosis_mode": "deep_agents",

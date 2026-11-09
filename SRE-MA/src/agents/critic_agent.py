@@ -141,8 +141,10 @@ def critic_node(state: AgentState) -> dict:
     action_plan = []
     if tool and act:
         blast = classify_blast_radius({"tool": tool, "params": {"service": tgt}})
+        # receipts of the terminal tools prove nothing — a proposal that only
+        # "recorded" itself must not pass as a tool-result citation
         citations = [str(e)[6:160] for e in state.get("investigation_scratchpad", [])
-                     if str(e).startswith("tool: ")][-3:]
+                     if str(e).startswith("tool: ") and "proposal recorded" not in str(e)][-3:]
         params = {"service": tgt}
         if tool == "set_feature_flag" and state.get("proposed_flag"):
             params["flag"] = state["proposed_flag"]
