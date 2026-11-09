@@ -254,10 +254,17 @@ REMEDIATIONS = [
 #KG ingestor
 class KGIngestor:
     def __init__(self):
-        self.driver = GraphDatabase.driver(
-            NEO4J_URI,
-            auth=(NEO4J_USER, NEO4J_PASSWORD),
-        )
+        try:
+            self.driver = GraphDatabase.driver(
+                NEO4J_URI,
+                auth=(NEO4J_USER, NEO4J_PASSWORD),
+                notifications_min_severity="OFF",
+            )
+        except TypeError:
+            self.driver = GraphDatabase.driver(
+                NEO4J_URI,
+                auth=(NEO4J_USER, NEO4J_PASSWORD),
+            )
 
     def close(self):
         self.driver.close()
@@ -428,10 +435,17 @@ def append_past_incident(
     called by execute_node after fixing an incident.
     adds it to the graph so we know for next time.
     """
-    driver = GraphDatabase.driver(
-        NEO4J_URI,
-        auth=(NEO4J_USER, NEO4J_PASSWORD),
-    )
+    try:
+        driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+            notifications_min_severity="OFF",
+        )
+    except TypeError:
+        driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+        )
     try:
       
         with driver.session() as session:
