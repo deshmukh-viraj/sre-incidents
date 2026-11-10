@@ -236,6 +236,15 @@ def _run_agent(incident_id: str, raw_signals: dict, config: Optional[dict] = Non
             print(f"[agent] Graph paused for {incident_id} — awaiting human approval")
         else:
             _record_attribution(result, raw_signals.get('severity', 'unknown'))
+            # Bet 5/D-06: every terminal incident is a learning candidate; the
+            # deterministic draft lands in the human-gated queue, never auto-applied
+            try:
+                from src.learning.distill import enqueue
+                enqueue({**result, "raw_signals": raw_signals,
+                         "alert_name": raw_signals.get("alert_name"),
+                         "affected_services": [raw_signals.get("service")] if raw_signals.get("service") else []})
+            except Exception as _e:
+                print(f"[distill] enqueue skipped: {_e}")
 
             business_mttr = result.get("business_mttr_seconds")
             if business_mttr:
@@ -799,6 +808,29 @@ async def approve_incident(incident_id: str, background_tasks: BackgroundTasks, 
         raise HTTPException(status_code=500, detail=f"Failed to resume graph: {e}")
 
         
+
+@app.get("/learning/drafts")
+def list_learning_drafts():
+    """pending learning drafts (Bet 5): human-gated memory writes."""
+    from src.learning.distill import pending_drafts
+    return pending_drafts()
+
+
+@app.post("/learning/drafts/{draft_id}/approve")
+def approve_learning_draft(draft_id: str, req: ApprovalRequest, request: Request = None):
+    """approve a learning draft: it becomes agent memory (KG) with the approver
+    recorded on the audit chain. The approval request reuses the standard
+    authn (token check fires when APPROVAL_TOKEN is set)."""
+    _APPROVAL_TOKEN = os.getenv("APPROVAL_TOKEN", "")
+    supplied = request.headers.get("x-approver-token") if request is not None else None
+    if _APPROVAL_TOKEN and supplied != _APPROVAL_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid or missing approver token")
+    from src.learning.distill import approve_draft
+    out = approve_draft(draft_id, req.approver, req.notes or None)
+    if not out.get("ok"):
+        raise HTTPException(status_code=404, detail=out.get("detail"))
+    return out
+
 
 @app.post("/incidents/{incident_id}/resolve")
 async def resolve_incident(incident_id: str, payload: ResolveRequest):

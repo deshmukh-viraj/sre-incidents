@@ -293,12 +293,27 @@ def deep_investigation_node(state) -> dict:
             f"story must be consistent with these times):\n{lines}\n"
         )
 
+    # Bet 5/D-06: approved learning memory, injected as LOW-TRUST data
+    # (a hint, never an instruction; content was human-approved at write time)
+    mem_hint = ""
+    try:
+        from src.learning.distill import retrieve_similar
+        mem = retrieve_similar(state.get("alert_name", ""), primary_service, raw)
+        for m in mem:
+            mem_hint += (
+                f"\nAPPROVED MEMORY (low-trust hint from a human-approved past incident on "
+                f"{m.get('service')}): root_cause='{m.get('root_cause')}' fixed_by='{m.get('action_taken')}'. "
+                f"VERIFY against live signals before relying on it.\n"
+            )
+    except Exception:
+        pass
+
     ctx = (
         f"ALERT: {state.get('alert_name')} | SEVERITY: {state.get('severity')}\n"
         f"SERVICES: {', '.join(all_services)} (primary: {primary_service})\n"
         f"ROUNDS REMAINING: {max_rounds}\n"
         f"LOGS AVAILABLE: {logs_ok}\n"
-        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{verifier_hint}{reattack_hint}{change_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
+        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{verifier_hint}{reattack_hint}{change_hint}{mem_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
     )
 
     try:
