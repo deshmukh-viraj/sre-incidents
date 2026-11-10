@@ -278,12 +278,27 @@ def deep_investigation_node(state) -> dict:
     if state.get("reattack_hint"):
         reattack_hint = f"\nPOST-ACTION RETRY: {state['reattack_hint']}\n"
 
+    # D-02/Bet 2: deterministic onset times are evidence anchors — a root-cause
+    # narrative the agent produces must align with when the metrics actually broke
+    cps = raw.get("changepoints") or []
+    change_hint = ""
+    if cps:
+        lines = "\n".join(
+            f"  {c['signal']}: level shift {c['direction']} {c['sigma']}sigma at "
+            f"{c['onset_iso']} ({c['minutes_ago']}m ago, {c['before']} -> {c['after']})"
+            for c in cps
+        )
+        change_hint = (
+            "\nCHANGE-POINT EVIDENCE (deterministic onset detection — your root-cause "
+            f"story must be consistent with these times):\n{lines}\n"
+        )
+
     ctx = (
         f"ALERT: {state.get('alert_name')} | SEVERITY: {state.get('severity')}\n"
         f"SERVICES: {', '.join(all_services)} (primary: {primary_service})\n"
         f"ROUNDS REMAINING: {max_rounds}\n"
         f"LOGS AVAILABLE: {logs_ok}\n"
-        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{verifier_hint}{reattack_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
+        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{verifier_hint}{reattack_hint}{change_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
     )
 
     try:
