@@ -1,0 +1,49 @@
+# Phase 3 / gap 5: deny-by-default egress for the agent pod. The only allowed
+# destinations: observability backends, the LLM API, Alertmanager, DNS, and the
+# agent's own API. TEMPLATES - adjust IPs/CIDRs/DNS names to your environment.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sre-ma-egress-allowlist
+  namespace: sre-ma
+spec:
+  podSelector:
+    matchLabels:
+      app: sre-ma-agent
+  policyTypes: ["Egress"]
+  egress:
+    - to:                      # DNS
+      - namespaceSelector: {}
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:                      # observability backends (pack endpoints)
+      - ipBlock: { cidr: 10.0.0.0/8 }   # REPLACE: backend CIDRs
+      ports:
+        - protocol: TCP
+          port: 9090           # prometheus
+          port: 3100           # loki
+          port: 3200           # tempo
+    - to:                      # LLM API egress (provider gateway)
+      - ipBlock: { cidr: 0.0.0.0/0 }
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:                      # alertmanager
+      - ipBlock: { cidr: 10.0.0.0/8 }   # REPLACE
+      ports:
+        - protocol: TCP
+          port: 9093
+    - to:                      # the agent's own API (same namespace)
+      - podSelector:
+          matchLabels:
+            app: sre-ma-api
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -1,0 +1,54 @@
+# Phase 3 / gap 5: split read (investigation) and write (execution) identities.
+# TEMPLATES - review with your platform team. The agent's investigation loop
+# runs as the READ identity; only the executor step assumes the WRITE identity.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-ma-reader
+  namespace: sre-ma
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sre-ma-writer
+  namespace: sre-ma
+---
+# Read identity: view-only cluster access (get/list/watch; NO create/patch/delete)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sre-ma-reader
+  namespace: sre-ma
+rules:
+  - apiGroups: ["", "apps", "batch"]
+    resources: ["pods", "pods/log", "events", "deployments", "services", "jobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sre-ma-reader
+  namespace: sre-ma
+subjects:
+  - kind: ServiceAccount
+    name: sre-ma-reader
+    namespace: sre-ma
+roleRef:
+  kind: Role
+  name: sre-ma-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# Write identity: ONLY the verbs the policy allowlist can propose
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sre-ma-writer
+  namespace: sre-ma
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]          # kubectl_patch_deployment, restart via patch
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch"]          # kubectl_scale
