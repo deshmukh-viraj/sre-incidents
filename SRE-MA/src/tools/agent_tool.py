@@ -18,6 +18,7 @@ from src.tools.backends.registry import get_backend
 from src.tools.kg_tool import (
     query_knowledge_graph,
     query_recent_resolved_incident,
+    find_active_upstream_incident,
     SERVICE_METRICS,
     label_notes_for,
 )
@@ -201,6 +202,104 @@ def query_service_logs(service: str, start: str = "", end: str = "", text: str =
     return "\n".join(rows)
 
 @tool
+def query_traces(service: str, lookback_minutes: int = 10, min_duration_ms: int = 0) -> str:
+    """Return recent trace summaries for a service (id, root service, duration, start).
+
+    Use for: seeing the ACTUAL cross-service call path behind a symptom — which
+    downstream hop is slow or erroring, instead of inferring it from metric
+    coincidence. Best after metrics point at a suspect hop.
+
+    Args:
+        service: plain service name (e.g. 'checkout', 'payment_gateway').
+        lookback_minutes: how far back to search (default 10).
+        min_duration_ms: optional floor, e.g. 500 to surface only slow traces.
+
+    HONEST OUTPUT: a disabled traces backend (this environment pack has none)
+    or an unreachable one is reported as 'signal unavailable: <reason>' — that
+    means the signal could not be obtained, NEVER 'no problem found'.
+    """
+    svc = (service or "").strip()
+    if not svc:
+        return "signal unavailable: service is required"
+    try:
+        tempo = get_backend("traces")
+        if tempo is None:
+            return "signal unavailable: no traces backend in this environment pack (traces disabled)"
+        spans = _cached_read(
+            f"traces:{svc}:{lookback_minutes}:{min_duration_ms}",
+            lambda: tempo.search(
+                svc,
+                lookback_minutes=max(1, min(int(lookback_minutes), 60)),
+                min_duration_ms=int(min_duration_ms) if min_duration_ms else None,
+            ),
+        )
+    except Exception as e:
+        return f"signal unavailable: traces backend error: {e}"
+    if isinstance(spans, str):
+        # _cached_read returns a [DUPLICATE] marker string on repeat queries
+        return spans
+    if not spans:
+        return f"signal unavailable: no traces matched service='{svc}' in the last {lookback_minutes}m"
+    rows = [f"traces for {svc} (lookback={lookback_minutes}m, n={len(spans)}):"]
+    for s in spans:
+        rows.append(
+            f"  {s.get('trace_id')} root={s.get('root_service')} "
+            f"name={s.get('root_trace_name')} dur={s.get('duration_ms')}ms"
+        )
+    return "\n".join(rows)
+
+@tool
+def get_recent_changes(service: str = "") -> str:
+    """Return WHAT CHANGED recently around a service: current feature-flag variant
+    mix (from live flag-evaluation metrics) and recent resolved incidents touching
+    it or its upstream (KG).
+
+    Use for: the FIRST question of any investigation — most incidents are caused
+    by a change. If a flag's variant mix shifted, that shift is your prime
+    suspect; if a nearby upstream incident is active, start there.
+
+    HONEST OUTPUT: each source that does not exist in this environment (e.g. no
+    flag metrics in the fintech sim, no k8s events backend) is reported as
+    unavailable — never as 'nothing changed'.
+    """
+    svc = (service or "").strip()
+    sections: list = []
+
+    # current flag variant mix: per flag, which variant is actually evaluating now
+    try:
+        expr = ("sum by (feature_flag_key, feature_flag_result_variant) "
+                "(increase(feature_flag_evaluation_success_total[10m]))")
+        val = _cached_read(f"flagmix:{expr}", lambda: _instant_query(expr))
+        if isinstance(val, str) and val.startswith("[DUPLICATE]"):
+            sections.append(f"[Flag variants] {val}")
+        elif val:
+            sections.append(f"[Flag variants, last 10m evaluations] {val}")
+        else:
+            sections.append("[Flag variants] signal unavailable: no flag-evaluation metrics in this environment")
+    except Exception as e:
+        sections.append(f"[Flag variants] signal unavailable: {e}")
+
+    # recent incident activity on or upstream of the service (KG; static-topology
+    # fallback covers Neo4j-outage regimes)
+    if svc:
+        try:
+            recent = find_active_upstream_incident(svc, window_min=60)
+            if recent:
+                sections.append(
+                    f"[Recent incident] upstream {recent.get('upstream_service')} "
+                    f"({recent.get('incident_id')}): {recent.get('root_cause')}"
+                )
+            else:
+                sections.append("[Recent incident] none found, or the knowledge graph is unreachable (could not verify)")
+        except Exception as e:
+            sections.append(f"[Recent incident] signal unavailable: {e}")
+    else:
+        sections.append("[Recent incident] unavailable: pass a service name")
+
+    sections.append("[K8s events / deploys] signal unavailable: no kubernetes events source in this environment")
+    return "\n".join(sections)
+
+@tool
 def query_topology(service: str) -> str:
     """Return the service's dependency topology, past incidents AND the authoritative
     curated PromQL queries from the knowledge graph (live; beats any catalog).
@@ -324,6 +423,8 @@ def escalate_with_reason(reason: str) -> str:
 READ_TOOLS = [
     query_prometheus_metric,
     query_service_logs,
+    query_traces,
+    get_recent_changes,
     query_topology,
     list_metrics,
     lookup_runbook_chunk,
