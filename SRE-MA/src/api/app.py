@@ -683,7 +683,7 @@ async def get_incident(incident_id: str):
 
 
 @app.post("/incidents/{incident_id}/approve")
-async def approve_incident(incident_id: str, background_tasks: BackgroundTasks, req: ApprovalRequest, request: Request):
+async def approve_incident(incident_id: str, background_tasks: BackgroundTasks, req: ApprovalRequest, request: Request = None):
     # gap 4: the approval endpoint is the crown jewel. Authn when APPROVAL_TOKEN
     # is set (sim regimes may leave it unset; startup logs a warning).
     _APPROVAL_TOKEN = os.getenv("APPROVAL_TOKEN", "")

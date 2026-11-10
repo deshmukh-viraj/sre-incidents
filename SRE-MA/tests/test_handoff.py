@@ -92,5 +92,7 @@ def test_approve_endpoint_uses_command_resume():
     src = inspect.getsource(app_mod._resume_agent)
     assert "Command(resume=resume_payload)" in src
     src2 = inspect.getsource(app_mod.approve_incident)
-    assert "resume_payload = {\"approved\": req.approved" in src2
+    # the resume payload must carry the decision AND the approval binding
+    assert '"approved": req.approved' in src2
+    assert '"approved_action_keys": bound_keys' in src2
     assert "agent_graph.update_state" not in src2
