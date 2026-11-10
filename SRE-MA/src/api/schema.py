@@ -54,6 +54,11 @@ class ApprovalRequest(BaseModel):
     approved: bool = Field(description="True to approve and execute, false to reject")
     approver:str = Field(description="Name or ID of the engineer approving")
     notes:  Optional[str] = None
+    approved_action_keys: Optional[List[str]] = Field(
+        default=None,
+        description="Optional approval binding: approve only these pending action "
+                    "idempotency keys (from the interrupt payload). Omit to bind all.",
+    )
 
 
 class ResolveRequest(BaseModel):

@@ -8,6 +8,7 @@ the agent proposes, this module disposes.
 """
 
 import json
+import os
 import re
 from typing import Literal
 from src.graph.routing import DELTA_EFFECT_SECONDS, DIAGNOSIS_CONFIDENCE
@@ -96,6 +97,12 @@ def policy_validator_node(state) -> dict:
     max_conf = max((h.get("confidence", 0) for h in state.get("hypotheses", [])), default=0.0)
     requires_approval = state.get("requires_approval", False)
 
+    # kill switch (gap 4): read per call so ops can flip it live; every action
+    # becomes human-gated while set. Intake continues, nothing executes alone.
+    kill = os.getenv("SRE_AUTONOMY_DISABLED") == "1"
+    if kill:
+        print("[policy] KILL SWITCH active: every action routes to the human gate")
+
     # verifier verdict gate: a diagnosis the adversarial verifier could NOT uphold
     # (unverifiable/ungrounded, or contradicted after the reroute cap) never
     # auto-executes — it goes to the human gate with the plan prepared.
@@ -152,6 +159,8 @@ def policy_validator_node(state) -> dict:
                     print("[policy] flag flip without grounded disproof queries -> human gate")
                     a = {**a, "requires_approval": True}
         if verifier_blocked:
+            a = {**a, "requires_approval": True}
+        if kill:
             a = {**a, "requires_approval": True}
         validated.append(a)
 

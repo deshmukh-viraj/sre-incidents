@@ -156,7 +156,13 @@ def human_gate_node(state: AgentState) -> dict:
     # interrupted run's partials are discarded). One page, with the decision.
     human_decsion = interrupt({
         "question": "Do you approve the action plan?",
-        "incident_id": incident_id
+        "incident_id": incident_id,
+        # the API reads this for approval-expiry (stale decisions cannot resume)
+        "paused_at": time.time(),
+        # the pending plan's idempotency keys: the API binds the approval to them
+        "pending_action_keys": [
+            idem_key(incident_id, a) for a in state.get("action_plan", [])
+        ],
     })
     log_stage(incident_id, "HUMAN_GATE", f"resumed with input: {human_decsion.get('approved', False)}")
     message = (
@@ -168,13 +174,30 @@ def human_gate_node(state: AgentState) -> dict:
         f" by {human_decsion.get('approver', 'system')}\n"
     )
     notify_slack(message=message, channel="incidents", severity="warning", incident_id=incident_id)
-    return {
+    out = {
         "human_approved": human_decsion.get("approved", False),
         "approved_by": human_decsion.get("approver", "system"),
         "approval_timeout": False,
         "approval_notified": True,
-
     }
+    # approval binding (gap 4): the API verifies the decision against the paused
+    # plan's keys; only bound keys survive into execution, the rest are recorded
+    approved_keys = human_decsion.get("approved_action_keys")
+    if human_decsion.get("approved") and approved_keys is not None:
+        keep = set(approved_keys)
+        plan = state.get("action_plan") or []
+        kept, dropped = [], []
+        for a in plan:
+            (kept if idem_key(incident_id, a) in keep else dropped).append(a)
+        if dropped:
+            print(f"[human_gate] approval binding dropped {len(dropped)} unapproved action(s)")
+            out["action_plan"] = kept
+            out["policy_rejections"] = [
+                {"action": d.get("action"),
+                 "reason": "not in the approved action keys (approval binding)"}
+                for d in dropped
+            ]
+    return out
 
 @observe(name="verify_recovery")
 def _verify_recovery(

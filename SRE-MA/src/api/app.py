@@ -14,7 +14,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 from prometheus_client import make_asgi_app, Counter, Histogram, Gauge
@@ -38,6 +38,13 @@ from src.api.schema import (
 from src.graph.routing import ALERT_CORRELATION_WINDOW, DEFAULT_CORRELATION_WINDOW, infer_service
 from src.graph.timeutils import parse_ts
 from src.utils.logger import inc_id
+
+# gap 4 control-plane guards (see docs/TARGET_ARCHITECTURE.md section 6)
+from collections import deque
+_WEBHOOK_TIMES: deque = deque()
+_ANSWER_PATTERN = __import__("re").compile(
+    r"(?i)((remote_)?flag\s*[=:]\s*\S+|(target_)?variant\s*[=:]\s*\S+|set\s+\S*variant\s+to\s+\S+)"
+)
 from src.tools.kg_tool import find_active_upstream_incident
 from src.observability.langfuse_logger import (
     get_langfuse_handler,
@@ -483,6 +490,21 @@ async def alertmanager_webhook(
     catch webhooks from alertmanager.
     dedupes using langgraph thread_id so we don't spam.
     """
+    # gap 4: a webhook flood is a cost attack (every alert spawns LLM work).
+    # sliding 60s window, per-process (single-service deployment by design).
+    now_s = _utcnow().timestamp()
+    while _WEBHOOK_TIMES and now_s - _WEBHOOK_TIMES[0] > 60:
+        _WEBHOOK_TIMES.popleft()
+    _WEBHOOK_TIMES.append(now_s)
+    if len(_WEBHOOK_TIMES) > int(os.getenv("WEBHOOK_ALERT_RATE_PER_MIN", "60")):
+        raise HTTPException(status_code=429, detail="alert rate limit exceeded")
+    active = sum(
+        1 for i in _incidents.values()
+        if str(i.get("status", "")).lower() not in ("resolved", "failed", "escalated", "executed_unverified", "mitigated")
+    )
+    if active >= int(os.getenv("MAX_ACTIVE_INCIDENTS", "8")):
+        raise HTTPException(status_code=429, detail=f"concurrent incident cap reached ({active} active)")
+
     created, ignored = [], []
     for alert in payload.alerts:
         if alert.status != "firing":
@@ -495,6 +517,14 @@ async def alertmanager_webhook(
         blocklist = {s.strip() for s in os.getenv(
             "ALERT_LABEL_BLOCKLIST", "remote_flag,remote_variant").split(",") if s.strip()}
         labels = {k: v for k, v in labels.items() if k not in blocklist}
+
+        # no-hints guard for annotations (leak postmortem): a drifted rule can put
+        # the ANSWER in free text; redact flag/variant assignment patterns only.
+        for k, v in list(annots.items()):
+            v = str(v)
+            if _ANSWER_PATTERN.search(v):
+                annots[k] = _ANSWER_PATTERN.sub("[redacted: no-hints guard]", v)
+                print(f"[api] no-hints guard: redacted answer pattern in annotation '{k}'")
 
         alert_name = labels.get('alertname', 'unknown-alert')
         service = labels.get('service') or infer_service(alert_name)
@@ -653,7 +683,15 @@ async def get_incident(incident_id: str):
 
 
 @app.post("/incidents/{incident_id}/approve")
-async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, req: ApprovalRequest):
+async def approve_incident(incident_id: str, background_tasks: BackgroundTasks, req: ApprovalRequest, request: Request):
+    # gap 4: the approval endpoint is the crown jewel. Authn when APPROVAL_TOKEN
+    # is set (sim regimes may leave it unset; startup logs a warning).
+    _APPROVAL_TOKEN = os.getenv("APPROVAL_TOKEN", "")
+    if _APPROVAL_TOKEN:
+        supplied = request.headers.get("x-approver-token") if request is not None else None
+        if supplied != _APPROVAL_TOKEN:
+            raise HTTPException(status_code=401, detail="invalid or missing approver token")
+
     if incident_id not in _incidents:
         raise HTTPException(status_code=404, detail=f"Incident {incident_id} not found")
 
@@ -676,6 +714,7 @@ async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, r
 
     try:
         from src.graph.orchestrator import app as agent_graph
+        from src.graph.policy import idem_key
         config = {
             "configurable": {"thread_id": incident_id}
         }
@@ -687,6 +726,39 @@ async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, r
                 status_code=409,
                 detail=f"Incident {incident_id} graph is not awaiting approval (status={current_status})."
             )
+
+        # approval binding: read the paused plan's keys from the interrupt payload
+        pending_keys = []
+        paused_at = None
+        try:
+            for task in (state.tasks or []):
+                for intr in (getattr(task, "interrupts", None) or []):
+                    payload_val = getattr(intr, "value", None) or {}
+                    if isinstance(payload_val, dict):
+                        pending_keys = payload_val.get("pending_action_keys") or pending_keys
+                        paused_at = payload_val.get("paused_at") or paused_at
+        except Exception as e:
+            print(f"[api] interrupt payload unreadable (binding degrades to all-pending): {e}")
+
+        # staleness: a decision made hours later executes against state that has
+        # drifted; force the operator through /resolve instead
+        max_age = int(os.getenv("APPROVAL_MAX_AGE_S", "7200"))
+        if paused_at and (_utcnow().timestamp() - float(paused_at)) > max_age:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Approval window expired (paused > {max_age}s). Resolve manually via POST /incidents/{incident_id}/resolve."
+            )
+
+        requested = req.approved_action_keys
+        if requested is not None and pending_keys:
+            bad = [k for k in requested if k not in pending_keys]
+            if bad:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"approved_action_keys not part of the paused plan: {bad}"
+                )
+        bound_keys = requested if requested is not None else pending_keys
+        incident["approved_action_keys"] = bound_keys
 
         incident["approved_by"] = req.approver
         incident["approved_at"] = _utcnow().isoformat()
@@ -700,13 +772,18 @@ async def approve_incident(incident_id: str,background_tasks: BackgroundTasks, r
         #canonical HITL resume the node's interrupt() receives the
         # decision directly via Command(resume=...); human_gate_node writes
         # human_approved/approved_by itself (no update_state re-invoke dance).
-        resume_payload = {"approved": req.approved, "approver": req.approver}
+        resume_payload = {
+            "approved": req.approved,
+            "approver": req.approver,
+            "approved_action_keys": bound_keys,
+        }
         background_tasks.add_task(_resume_agent, incident_id, config, resume_payload)
 
         return {
             "status": "approved" if req.approved else "rejected",
             "incident_id": incident_id,
-            "approver": req.approver
+            "approver": req.approver,
+            "approved_action_keys": bound_keys,
         }
 
     except HTTPException:
