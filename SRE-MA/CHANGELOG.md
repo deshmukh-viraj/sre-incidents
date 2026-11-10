@@ -1,6 +1,28 @@
 # Changelog
 
-All notable changes to SRE-MA. Dates are 2026-11-03 (v2 integration), 2026-11-04 (live validation) and 2026-11-09 (post-mortem hardening).
+All notable changes to SRE-MA. Dates are 2026-11-03 (v2 integration), 2026-11-04 (live validation), 2026-11-09 (post-mortem hardening) and 2026-11-10 (target-architecture execution).
+
+## [2026-11-10] — target architecture execution: Phase 0-4 (feature/v2-refactor)
+
+Executes docs/TARGET_ARCHITECTURE.md end to end. Phase 0: KG-frontier hypothesis
+seeds (hardcoded list deleted), runbook-lookup wired, re-attack edge (D-02).
+Phase 1: `query_traces` + `get_recent_changes` capabilities, corroboration
+across signal classes, disproof-gated flag flips, deterministic change-point
+onset hints (Bet 2). Phase 2: control-plane hardening (approval authn/binding/
+staleness, webhook rate+concurrency caps, live kill switch, annotation
+answer-screening) and the fault gym with an adversarial injection suite (Bet 1
+offline lane). Phase 3: tamper-evident audit chain (gap 6), human-gated
+distillation loop with fingerprint retrieval (Bet 5), deployment templates for
+identity split and egress (gap 5). Phase 4: capability layer as a read-only
+MCP stdio server (Bet 4).
+
+### Verification status (honest)
+- Unit level: full suite green (189 passed, 1 pre-existing env-dependent
+  failure unrelated to this work), gate self-checks green, offline gym 6/6.
+- LIVE LEVEL: NOT YET EXECUTED — the otel-demo sandbox was down for the whole
+  session. The live validation runs (Phase 0 re-attack cycle + one run per
+  later phase) remain the required done-criterion; see docs/SANDBOX_RUNBOOK.md
+  and docs/TARGET_ARCHITECTURE.md section 7.
 
 ## [2026-11-09] — post-mortem hardening: act-rule gates, evidence hygiene, tracing (feature/v2-refactor)
 
