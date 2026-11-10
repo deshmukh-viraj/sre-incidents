@@ -18,7 +18,7 @@ from src.tools.agent_tool import (
     ALL_TOOLS, READ_TOOLS, propose_remediation, escalate_with_reason,
     reset_investigation_cache,
 )
-from src.tools.kg_tool import SERVICE_METRICS
+from src.tools.kg_tool import SERVICE_METRICS, get_dependencies
 from src.graph.routing import (
     P99_LATENCY_WARNING, ERROR_RATE_WARNING, THROTTLE_RATE_HIGH,
     DB_POOL_WARNING, CIRCUIT_BREAKER_OPEN, DECLINE_RATE_HIGH,
@@ -45,9 +45,7 @@ INVESTIGATOR_PROMPT = (
     "RULE 1: start with query_topology(primary service) for dependencies, past incidents "
     "and exact PromQL. The PromQL returned by query_topology is authoritative — use it directly. "
     "Only call list_metrics(service) as a FALLBACK if a query returns empty or errors. "
-    "You have a budget of {max_rounds} tool rounds. Prioritize the most diagnostic query first: "
-    "for alerts mentioning DB pool pressure, query the pool metrics first; "
-    "for circuit breaker alerts, query the breaker state and upstream latency first. "
+    "You have a budget of {max_rounds} tool rounds. "
     "Remaining budget will be reported each round. "
     "TERMINATION: you MUST end by EITHER calling propose_remediation "
     "OR your final message being exactly 'escalate'. Never end with only a summary. "
@@ -225,16 +223,13 @@ def deep_investigation_node(state) -> dict:
     error_logs = raw.get("error_log_summaries", [])[:6]
     error_text = "\n".join(error_logs)
 
-    #extract downstream services from error logs (hypothesis seeds)
-    downstream_services = set()
-    for log in error_logs:
-        lower = log.lower()
-        for svc in ["card_rails", "postgres", "postgres_primary", "fraud_model", "redis", "kafka", "auth_service", "notification_service"]:
-            if svc in lower:
-                downstream_services.add(svc)
-
     affected_services = state.get('affected_services') or ['unknown']
     primary_service = affected_services[0]
+    #hypothesis seeds: candidates come from the KG dependency frontier of the
+    #primary service (works offline via the static topology fallback); error
+    #logs pick WHICH frontier nodes to probe first
+    frontier = get_dependencies(primary_service, hops=2)
+    downstream_services = {dep for log in error_logs for dep in frontier if dep in log.lower()}
     all_services = [primary_service] + list(downstream_services)
 
     hypothesis_hint = ""
