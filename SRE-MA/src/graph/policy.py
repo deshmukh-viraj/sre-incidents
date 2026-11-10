@@ -8,6 +8,7 @@ the agent proposes, this module disposes.
 """
 
 import json
+import re
 from typing import Literal
 from src.graph.routing import DELTA_EFFECT_SECONDS, DIAGNOSIS_CONFIDENCE
 from src.tools.backends.registry import service_tier
@@ -34,6 +35,25 @@ SERVICE_MUTATING_TOOLS = {
     "kubectl_restart_deployment", "kubectl_scale",
 }
 MIN_CITATIONS_FOR_AUTO = 2
+
+
+def _signal_class(evidence_line: str) -> str:
+    """coarse signal class a citation came from (metrics|logs|traces|flags).
+    security gap 2: policy checks grounding, not truth — one poisoned channel
+    must not carry an autonomous action, so the act-rule also needs the
+    citations to span >=2 DISTINCT classes. Ambiguous lines collapse to
+    'metrics', which can only make distinctness HARDER to reach (the safe
+    direction: ambiguity downgrades to the human gate)."""
+    e = str(evidence_line).lower()
+    if "trace" in e or "root=" in e or "dur=" in e and "ms" in e:
+        return "traces"
+    if "feature_flag" in e or "variant" in e or "flag " in e:
+        return "flags"
+    if ("backend=loki" in e or "backend=opensearch" in e or "log_patterns" in e
+            or "auth_failures" in e or "bulk_data_export" in e or "sample" in e
+            or re.search(r"\bx\d+ \[", e)):
+        return "logs"
+    return "metrics"
 
 
 def _citations_for_target(state, target) -> list:
@@ -107,11 +127,29 @@ def policy_validator_node(state) -> dict:
                 print(f"[policy] tier('{target}')={tier or 'not in catalog'} -> human gate")
                 a = {**a, "requires_approval": True}
             elif state.get("diagnosis_mode") == "deep_agents":
-                # LLM-sourced diagnoses must cite >=2 tool results implicating the target
-                n_cites = len(_citations_for_target(state, target))
-                if n_cites < MIN_CITATIONS_FOR_AUTO:
-                    print(f"[policy] only {n_cites} citation(s) implicate '{target}' "
+                # LLM-sourced diagnoses must cite >=2 tool results implicating the target,
+                # spanning >=2 independent signal classes (gap 2: grounding is not truth —
+                # a single poisoned channel must not carry an autonomous action)
+                cites = _citations_for_target(state, target)
+                if len(cites) < MIN_CITATIONS_FOR_AUTO:
+                    print(f"[policy] only {len(cites)} citation(s) implicate '{target}' "
                           f"(need {MIN_CITATIONS_FOR_AUTO}) -> human gate")
+                    a = {**a, "requires_approval": True}
+                else:
+                    classes = sorted({_signal_class(c) for c in cites})
+                    if len(classes) < 2:
+                        print(f"[policy] citations span only {classes} "
+                              f"(need >=2 signal classes) -> human gate")
+                        a = {**a, "requires_approval": True}
+            if (a.get("tool") == "set_feature_flag"
+                    and not a.get("requires_approval")):
+                # autonomous flag flips must have survived EXECUTED disproof queries
+                # (verifier grounded = live values came back). In regimes where the
+                # verifier is deliberately disabled, the pre-existing gates apply.
+                from src.agents.verifier_agent import verifier_enabled
+                vr = state.get("verifier_result") or {}
+                if verifier_enabled(state) and not vr.get("grounded"):
+                    print("[policy] flag flip without grounded disproof queries -> human gate")
                     a = {**a, "requires_approval": True}
         if verifier_blocked:
             a = {**a, "requires_approval": True}

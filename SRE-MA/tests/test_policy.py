@@ -123,3 +123,46 @@ def test_reversible_map_matches_allowlist_core():
     # every reversible write tool must also be allowlisted (a reversible action
     # the policy rejects outright would be dead config)
     assert REVERSIBLE_WRITE_TOOLS <= ALLOWED_WRITE_TOOLS
+
+
+# --- D-02/security-gap-2: corroboration classes + disproof-before-flag-flip ---
+
+def _deep_state(evidence, plan=None, **extra):
+    return _state(
+        plan=plan or [_action()],
+        conf=0.85,
+        diagnosis_mode="deep_agents",
+        hypotheses=[{"confidence": 0.85, "evidence": evidence}],
+        affected_services=["payment_gateway"],
+        **extra,
+    )
+
+
+def test_single_class_citations_cannot_auto_execute():
+    # two metric citations pass the COUNT rule but span one class -> human gate
+    ev = [
+        'p99_latency_s{service="payment_gateway"} -> 0.98',
+        'error_rate{service="payment_gateway"} -> 0.12',
+    ]
+    out = policy_validator_node(_deep_state(ev))
+    assert out["action_plan"][0]["requires_approval"] is True
+
+
+def test_two_class_citations_can_auto_execute():
+    # metric + log citations span two distinct classes -> stays autonomous
+    ev = [
+        'p99_latency_s{service="payment_gateway"} -> 0.98',
+        'backend=loki x142 [ERROR] payment_gateway upstream timeout after 5000ms',
+    ]
+    out = policy_validator_node(_deep_state(ev))
+    assert out["action_plan"][0]["requires_approval"] is False
+
+
+def test_signal_class_classifier():
+    from src.graph.policy import _signal_class
+    assert _signal_class('p99_latency_s{service="x"} -> 0.9') == "metrics"
+    assert _signal_class("backend=loki x12 [ERROR] timeout") == "logs"
+    assert _signal_class("traces for checkout dur=812ms root=frontend") == "traces"
+    assert _signal_class("feature_flag_evaluation_success_total variant=b") == "flags"
+    # ambiguity collapses to metrics (safe direction)
+    assert _signal_class("weird unclassifiable line") == "metrics"
