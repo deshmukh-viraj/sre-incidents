@@ -126,3 +126,17 @@ def test_infer_service_mapping():
     assert infer_service("DBConnectionPoolExhaustion") == "account_ledger"
     assert infer_service("FraudModelDrift") == "fraud_detector"
     assert infer_service("TotallyUnknown") == "payment_gateway"  # documented default
+
+
+def test_route_after_verification_reattack_budget():
+    # D-02: one executed-but-ineffective action earns exactly one re-attack;
+    # the second failure (or a plan that never executed) escalates to the human
+    from src.graph.routing import route_after_verification
+    assert route_after_verification({"verified": True}) == "end_resolved"
+    assert route_after_verification(
+        {"verified": False, "action_executed_at": "t", "reattacks": 0}
+    ) == "re_investigate"
+    assert route_after_verification(
+        {"verified": False, "action_executed_at": "t", "reattacks": 1}
+    ) == "escalate_execution"
+    assert route_after_verification({"verified": False}) == "escalate_execution"

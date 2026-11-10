@@ -589,6 +589,15 @@ def execute_node(state: AgentState) -> dict:
         "resolution_status": status,
         "verified": verified,
         "action_executed_at": action_executed_at_iso,
+        # D-02 re-attack budget: a failed execution is one unit of new evidence;
+        # the second failure escalates instead of looping
+        "reattacks": 0 if verified else 1,
+        "reattack_hint": None if verified else (
+            f"your remediation executed at {action_executed_at_iso} but verification did not "
+            f"confirm recovery (status={status}). The hypothesis did not hold or the action was "
+            f"insufficient. Re-query the live metrics NOW (cached values are pre-action and "
+            f"stale) and re-ground the diagnosis with different evidence before proposing again."
+        ),
         "verified_at": verified_at_iso,
         "business_mttr_seconds": business_mttr,
         "agent_mttr_seconds": agent_mttr,

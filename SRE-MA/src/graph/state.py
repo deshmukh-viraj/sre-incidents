@@ -198,6 +198,8 @@ class AgentState(TypedDict, total=False):
     tool_invocations: Annotated[List[Dict[str, Any]], _list_add]  # R5 audit of tool calls
     verifier_result: Optional[Dict[str, Any]]         # B1 VerificationChallenge dict
     verifier_reroutes: Annotated[int, _add_int]       # cap-1 return-to-investigation counter
+    reattacks: Annotated[int, _add_int]               # D-02: failed-execution counter, budget 1
+    reattack_hint: Optional[str]                      # D-02: post-action evidence hint, consumed by deep_investigation
     checker_result: Optional[Dict[str, Any]]          # B2 RecoveryChecker additional signal
     handoff_to_human: Optional[Dict[str, Any]]        # B7 handoff package {reason, options, ...}
     gate_version: Optional[str]                       # R5/R12: attribution gate version id
@@ -322,6 +324,8 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         tool_invocations=[],
         verifier_result=None,
         verifier_reroutes=0,
+        reattacks=0,
+        reattack_hint=None,
         checker_result=None,
         handoff_to_human=None,
         gate_version=os.getenv("GATE_VERSION", "gates-v1"),

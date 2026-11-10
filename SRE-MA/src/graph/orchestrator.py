@@ -122,7 +122,10 @@ def build_graph() -> StateGraph:
     })
     
     graph.add_conditional_edges("execute", route_after_verification, {
-        "end_resolved": "communicator", 
+        "end_resolved": "communicator",
+        # D-02: one executed-but-ineffective action re-enters investigation
+        # with the post-action evidence before the human gate
+        "re_investigate": "deep_investigation",
         "escalate_execution": "escalate",
     })
 

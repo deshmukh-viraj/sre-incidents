@@ -479,15 +479,21 @@ def route_after_remediator(
     return "execute"
 
 
-def route_after_verification(state: AgentState) -> Literal["end_resolved", "escalate_execution"]:
-    """after the executor runs a runbook and we poll metrics:
-    - metrics recivered -> end (success)
-    - metrics still breaching -> escalate (remediation failed)
+def route_after_verification(
+    state: AgentState,
+) -> Literal["end_resolved", "re_investigate", "escalate_execution"]:
+    """after the executor runs a plan and we poll metrics:
+    - metrics recovered -> end (success)
+    - action executed but metrics still breaching and the re-attack budget is
+      unspent -> one more investigation pass carrying the post-action evidence
+      (D-02: the failed action is evidence, not a verdict)
+    - re-attack already spent, or the plan never executed -> escalate (human)
     """
     if state.get("verified"):
         return "end_resolved"
-    else:
-        return "escalate_execution"
+    if state.get("action_executed_at") and int(state.get("reattacks", 0) or 0) < 1:
+        return "re_investigate"
+    return "escalate_execution"
 
 
 def route_after_investigation(state) -> Literal["critic", "llm_diagnoser", "verifier", "escalate"]:

@@ -210,7 +210,9 @@ def deep_investigation_node(state) -> dict:
     # cache so pass 2 sees recorded results + duplicate-suppression instead of
     # re-running identical queries (measured: ~75s + half the run cost, zero new
     # evidence). fresh incidents and critic re-investigations reset it.
-    if not state.get("verifier_reroutes"):
+    if not state.get("verifier_reroutes") or state.get("reattack_hint"):
+        #a re-attack MUST see fresh post-action values: cache-served duplicates
+        #would replay pre-action readings and poison the second pass
         reset_investigation_cache()
     tool_call_cache = {}
 
@@ -270,12 +272,18 @@ def deep_investigation_node(state) -> dict:
             f"diagnosis with DIFFERENT evidence — do not repeat those queries.\n"
         )
 
+    # D-02: the executor's action ran but verification failed; the observed
+    # post-action state is the new evidence for this pass
+    reattack_hint = ""
+    if state.get("reattack_hint"):
+        reattack_hint = f"\nPOST-ACTION RETRY: {state['reattack_hint']}\n"
+
     ctx = (
         f"ALERT: {state.get('alert_name')} | SEVERITY: {state.get('severity')}\n"
         f"SERVICES: {', '.join(all_services)} (primary: {primary_service})\n"
         f"ROUNDS REMAINING: {max_rounds}\n"
         f"LOGS AVAILABLE: {logs_ok}\n"
-        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{verifier_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
+        f"METRICS: \n{sig}\nERROR LOGS:\n{error_text}{critique_hint}{verifier_hint}{reattack_hint}{hypothesis_hint}{seed_text}\nInvestigate now"
     )
 
     try:
@@ -360,6 +368,8 @@ def deep_investigation_node(state) -> dict:
     cost = calculate_cost(input_tokens, output_tokens, model_name)
 
     base_return = {
+        # consumed: a stale re-attack hint must not re-inject into later passes
+        "reattack_hint": None,
         "investigation_scratchpad": [
             f"{m.type}: {str(m.content)[:200]}" for m in msgs
             if not (getattr(m, "type", "") == "tool"
