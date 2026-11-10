@@ -326,7 +326,7 @@ READ_TOOLS = [
     query_service_logs,
     query_topology,
     list_metrics,
+    lookup_runbook_chunk,
 ]
-INVESTIGATION_TOOLS = READ_TOOLS
 
 ALL_TOOLS = READ_TOOLS + [propose_remediation, escalate_with_reason]
