@@ -764,6 +764,13 @@ async def approve_incident(incident_id: str, background_tasks: BackgroundTasks, 
         incident["approved_at"] = _utcnow().isoformat()
         if req.notes:
             incident["approval_notes"] = req.notes
+        try:
+            from src.utils.audit import audit_event
+            audit_event(incident_id, req.approver, "approval_decision",
+                        {"approved": req.approved, "bound_action_keys": bound_keys,
+                         "notes": (req.notes or "")[:200]})
+        except Exception:
+            pass
 
         trace_id = incident.get("trace_id")
         if trace_id:

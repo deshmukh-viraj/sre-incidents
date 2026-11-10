@@ -172,7 +172,15 @@ def policy_validator_node(state) -> dict:
     
     if validated and any(a.get("requires_approval") for a in validated):
        requires_approval = True
-    return {"action_plan": validated, "requires_approval": requires_approval, 
+    try:
+        from src.utils.audit import audit_event
+        audit_event(state.get("incident_id", "unknown"), "policy_validator", "policy_decision",
+                    {"validated": [{"tool": a.get("tool"), "target": (a.get("params") or {}).get("service"),
+                                    "requires_approval": a.get("requires_approval")} for a in validated],
+                     "rejections": rejections, "kill_switch": kill})
+    except Exception:
+        pass
+    return {"action_plan": validated, "requires_approval": requires_approval,
             "policy_rejections": rejections, "plan_viable": bool(validated)}
     
 

@@ -605,6 +605,17 @@ def execute_node(state: AgentState) -> dict:
         severity = state.get("severity"),
     )
 
+    try:
+        from src.utils.audit import audit_event
+        audit_event(state["incident_id"], "executor", "execution_attribution",
+                    {"resolution_cause": resolution_cause, "verified": verified,
+                     "all_success": all_success, "business_mttr_seconds": business_mttr,
+                     "gate1_claim": gate1_claim, "gate2_target_bound": gate2_target_bound,
+                     "gate3": bool(g3 and g3.passed), "gate4": gate4_verified,
+                     "gate5": gate5_stable})
+    except Exception:
+        pass
+
     return {
 
         "action_plan": updated_plan,
