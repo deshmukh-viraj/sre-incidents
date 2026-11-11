@@ -57,7 +57,8 @@ sandbox:
     jaeger: monitoring
     tempo: monitoring
     opensearch: monitoring
-  # -L 9091:localhost:9090 (prometheus), -L 3200:localhost:3200 (tempo)
+  # -L 9091:localhost:9090 (prometheus), -L 3200:<jaeger query port> (traces;
+  # the demo runs Jaeger, not Tempo, and its 16686 port is remapped on the host)
   metrics:
     adapter: prometheus
     url: http://localhost:9091
@@ -69,7 +70,10 @@ sandbox:
     timeout_s: 15.0
     max_rows: 50
   traces:
-    adapter: tempo
+    adapter: jaeger
+    enabled: false   # the demo's Jaeger is v2.21 (v3 metadata API only; no
+                     # traces-search route). Re-enable when a Tempo container
+                     # or a v3-streaming-capable Jaeger lands on the instance.
     url: http://localhost:3200
     timeout_s: 10.0
     max_rows: 20

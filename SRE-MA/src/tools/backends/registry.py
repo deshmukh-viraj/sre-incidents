@@ -37,10 +37,12 @@ def _adapter_class(kind: str, adapter_name: str):
         from src.tools.backends.prometheus import PrometheusBackend
         from src.tools.backends.loki import LokiBackend
         from src.tools.backends.tempo import TempoBackend
+        from src.tools.backends.jaeger import JaegerBackend
         _ADAPTERS.update({
             ("metrics", "prometheus"): PrometheusBackend,
             ("logs", "loki"): LokiBackend,
             ("traces", "tempo"): TempoBackend,
+            ("traces", "jaeger"): JaegerBackend,
         })
     cls = _ADAPTERS.get((kind, adapter_name))
     if cls is None:
