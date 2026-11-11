@@ -48,7 +48,13 @@ def collect_incident_signals(service: str, window: str = "5m") -> Dict[str, Any]
         return {"service": service}
 
     def q(capability: str, **params) -> Optional[float]:
-        return _instant_query(backend.template(capability, service=service, window=window, **params))
+        try:
+            expr = backend.template(capability, service=service, window=window, **params)
+        except KeyError:
+            # this environment's dialect has no such capability: the signal is
+            # honestly absent (None), never a zero and never a crash
+            return None
+        return _instant_query(expr)
 
     signals: Dict[str, Any] = {
         "service": service,
