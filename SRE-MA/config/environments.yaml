@@ -59,6 +59,7 @@ sandbox:
     opensearch: monitoring
   # -L 9091:localhost:9090 (prometheus), -L 3200:<jaeger query port> (traces;
   # the demo runs Jaeger, not Tempo, and its 16686 port is remapped on the host)
+  label_style: oteldemo
   metrics:
     adapter: prometheus
     url: http://localhost:9091

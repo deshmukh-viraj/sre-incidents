@@ -28,11 +28,12 @@ class BackendError(Exception):
 class BackendConfig:
     """one backend's slice of the environment pack (config/environments.yaml)."""
     kind: str                 # metrics | logs | traces
-    adapter: str              # prometheus | loki | tempo | ...
+    adapter: str              # prometheus | loki | tempo | jaeger | ...
     url: str
     timeout_s: float = 10.0
     max_rows: int = 100       # hard ceiling on rows/series any query may return
     enabled: bool = True
+    label_style: str = "fintech"  # fintech | oteldemo: which query dialect templates use
 
 
 def bounded_get(url: str, cfg: BackendConfig) -> dict:

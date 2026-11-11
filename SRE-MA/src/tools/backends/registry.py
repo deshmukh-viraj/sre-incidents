@@ -70,6 +70,8 @@ def get_backend(kind: str) -> Optional[Any]:
         timeout_s=float(section.get("timeout_s", 10.0)),
         max_rows=int(section.get("max_rows", 100)),
         enabled=True,
+        # style is pack-wide; a backend section may still override it
+        label_style=section.get("label_style") or pack.get("label_style", "fintech"),
     )
     backend = _adapter_class(kind, cfg.adapter)(cfg)
     _BACKEND_CACHE[kind] = backend

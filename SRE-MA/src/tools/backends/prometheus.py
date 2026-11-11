@@ -28,6 +28,20 @@ METRIC_TEMPLATES = {
     "service_up": "up",
 }
 
+# oteldemo (OpenTelemetry demo) conventions: service_name= (NOT service=),
+# http_server_request_duration_seconds families, http_response_status_code.
+# Mirrors the instance's own alert-rule query shapes so gate math measures
+# what the alerts measure.
+OTELDEM_METRIC_TEMPLATES = {
+    "p99_latency": 'histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket{{service_name="{service}"}}[{window}])) by (le))',
+    "p50_latency": 'histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket{{service_name="{service}"}}[{window}])) by (le))',
+    "error_rate": 'sum(rate(http_server_request_duration_seconds_count{{service_name="{service}",http_response_status_code=~"5.."}}[{window}])) / sum(rate(http_server_request_duration_seconds_count{{service_name="{service}"}}[{window}]))',
+    "throttle_error_rate": 'sum(rate(http_server_request_duration_seconds_count{{service_name="{service}",http_response_status_code=~"429|504"}}[{window}])) / sum(rate(http_server_request_duration_seconds_count{{service_name="{service}"}}[{window}]))',
+    "rps": 'sum(rate(http_server_request_duration_seconds_count{{service_name="{service}"}}[1m]))',
+    "flag_variant_evaluations": 'sum by (feature_flag_key, feature_flag_result_variant) (increase(feature_flag_evaluation_success_total{{service_name="{service}"}}[{window}]))',
+    "service_up": "up",
+}
+
 # default metric family per parameterized template (overridable via the config pack)
 DEFAULT_METRIC = {
     "payment_decline_rate": "payment_transactions_total",
@@ -83,11 +97,17 @@ class PrometheusBackend(MetricsBackend):
         return clip(names, self.cfg)
 
     def template(self, capability: str, **params) -> str:
+        templates = (
+            OTELDEM_METRIC_TEMPLATES
+            if getattr(self.cfg, "label_style", "fintech") == "oteldemo"
+            else METRIC_TEMPLATES
+        )
         try:
-            tpl = METRIC_TEMPLATES[capability]
+            tpl = templates[capability]
         except KeyError:
             raise KeyError(
-                f"unknown metric capability '{capability}'. known: {sorted(METRIC_TEMPLATES)}"
+                f"unknown metric capability '{capability}' for label_style "
+                f"'{getattr(self.cfg, 'label_style', 'fintech')}'. known: {sorted(templates)}"
             )
         metric = params.get("metric") or DEFAULT_METRIC.get(capability, "")
         return tpl.format(**{
