@@ -88,12 +88,13 @@ def test_default_pack_is_fintech_sim_with_no_traces():
     registry.reset_cache()
 
 
-def test_sandbox_pack_enables_tempo(monkeypatch):
+def test_sandbox_pack_disables_traces_until_a_search_backend_exists(monkeypatch):
     monkeypatch.setenv("SRE_ENVIRONMENT", "sandbox")
     registry.reset_cache()
     assert registry.get_backend("metrics").url == "http://localhost:9091"
-    tempo = registry.get_backend("traces")
-    assert tempo is not None and tempo.url == "http://localhost:3200"
+    # verified live 2026-11-10: the demo instance runs Jaeger v2, which serves
+    # no trace-search route, so the pack keeps traces disabled and honest
+    assert registry.get_backend("traces") is None
     registry.reset_cache()
 
 
