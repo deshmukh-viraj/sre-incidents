@@ -241,16 +241,23 @@ def _verify_recovery(
             signals = collect_incident_signals(service, window="1m")
             curr_p99 = signals.get("p99_latency_s")
             curr_error = signals.get("error_rate")
-            
-            # return structured dataclass with t_clear and signal type
-            return VerificationResult(
-                verified=True,
-                p99_latency_s=curr_p99,
-                error_rate=curr_error,
-                t_clear=datetime.datetime.utcnow().isoformat(),
-                signal="alertmanager",
-                healthy_run_len=max(consecutive_healthy, min_consecutive),
-            )
+
+            # the alert clearing alone is not proof: a stale or diluted alert
+            # clears without any fix (the cartFailure trace credited a restart
+            # with p99/error both null). require at least one real metric.
+            if curr_p99 is None and curr_error is None:
+                log_stage(alert_name, "AM_RESOLVED_NO_METRICS",
+                          "alert cleared but no metric data; cannot credit the fix")
+            else:
+                # return structured dataclass with t_clear and signal type
+                return VerificationResult(
+                    verified=True,
+                    p99_latency_s=curr_p99,
+                    error_rate=curr_error,
+                    t_clear=datetime.datetime.utcnow().isoformat(),
+                    signal="alertmanager",
+                    healthy_run_len=max(consecutive_healthy, min_consecutive),
+                )
 
                 #primary: prometheus metric comparison 
         log_stage(alert_name, "VERIFY_METRICS", f"querying {service} metrics...")

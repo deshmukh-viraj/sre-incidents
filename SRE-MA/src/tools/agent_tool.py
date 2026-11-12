@@ -66,6 +66,23 @@ METRIC_CATALOG = {
 # merge in the remote-demo families so validate_expr accepts them too
 METRIC_CATALOG.update(OTEL_DEMO_CATALOG)
 
+
+def catalog_for_style(style: str) -> dict:
+    """metric families that actually exist for an environment's label style.
+    the merged catalog contains BOTH stacks' families, so handing it whole to
+    a verifier lets it write queries for metrics the live Prometheus never has
+    (the cartFailure trace showed exactly that)."""
+    if style == "oteldemo":
+        return {k: v for k, v in METRIC_CATALOG.items() if k in OTEL_DEMO_CATALOG}
+    return {k: v for k, v in METRIC_CATALOG.items() if k not in OTEL_DEMO_CATALOG}
+
+
+def catalog_for_active_environment() -> dict:
+    from src.tools.backends.registry import get_backend
+    backend = get_backend("metrics")
+    style = getattr(getattr(backend, "cfg", None), "label_style", "fintech") if backend else "fintech"
+    return catalog_for_style(style)
+
 #per-investigation duplicate-read cache: an identical read query inside one
 #investigation returns the recorded result instead of re-hitting the backend.
 #deep_investigation resets it per run; outside a run the cache is inert.

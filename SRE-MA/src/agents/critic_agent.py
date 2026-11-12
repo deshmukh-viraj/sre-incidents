@@ -14,6 +14,7 @@ from src.tools.kg_tool import get_dependencies
 
 import json
 import os
+import re
 
 def _known_runbook_ids() -> set:
     """runbook ids this deployment actually ships (runbooks.json), plus the
@@ -47,10 +48,22 @@ def critic_node(state: AgentState) -> dict:
         if rb and rb not in KNOWN_RB:
             issues.append(f"unknown runbook ref: {rb}"); rb = None
         ev = [e for e in h.get("evidence", []) if e]
-        if ev and not [e for e in ev if any(p in str(e).lower() for p in prefixes)]:
+        # a citation that is itself a query error is not evidence (the trace
+        # showed a plan whose three citations were all error messages)
+        real_ev = [e for e in ev
+                   if not re.search(r"^\s*(ERROR|AMBIGUOUS|\[DUPLICATE\])|"
+                                    r"unknown metric|returned no data|no data for|"
+                                    r"timed out|signal unavailable",
+                                    str(e), re.IGNORECASE)]
+        if ev and not real_ev:
             issues.append(
-                f"evidence ungrounded: none of {len(ev)} citation(s) reference a collected signal key "
-                f"(e.g. {str(ev[0])[:60]!r}); available keys start with: {sorted(prefixes)[:10]}")
+                f"evidence ungrounded: all {len(ev)} citation(s) are query errors, "
+                f"not measurements (e.g. {str(ev[0])[:60]!r})")
+            conf = max(conf - 0.15, 0.0)
+        elif ev and not [e for e in real_ev if any(p in str(e).lower() for p in prefixes)]:
+            issues.append(
+                f"evidence ungrounded: none of {len(real_ev)} citation(s) reference a collected signal key "
+                f"(e.g. {str(real_ev[0])[:60]!r}); available keys start with: {sorted(prefixes)[:10]}")
             conf = max(conf - 0.15, 0.0)
         validated.append({**h, "confidence": conf, "supporting_runbook": rb})
 

@@ -48,7 +48,7 @@ def _preflight_validate(state: AgentState, action_plan: list) -> dict:
     is forced so a human confirms before the (possibly stale) action runs.
     """
     service = (state.get("affected_services") or ["unknown"])[0]
-    calls, healthy_premise = [], True
+    calls, healthy_premise, errored = [], True, 0
     for key, tmpl, threshold in _PREFLIGHT_EXPRS[:REMEDIATOR_PREFLIGHT_QUERIES]:
         expr = tmpl.format(service=service)
         out = dispatcher.run_tool("query_prometheus_metric", {"expr": expr})
@@ -58,12 +58,28 @@ def _preflight_validate(state: AgentState, action_plan: list) -> dict:
                 and float(out) < threshold
         except (TypeError, ValueError):
             ok = False
+        if out is None or str(out).startswith("ERROR"):
+            errored += 1
         healthy_premise = healthy_premise and ok
         calls.append({"tool": "query_prometheus_metric", "args": {"expr": expr},
                       "result": str(out)[:120], "signal": key, "within_threshold": ok,
                       "ts": datetime.datetime.utcnow().isoformat(), "worker": "remediator-preflight"})
         if len(calls) >= REMEDIATOR_PREFLIGHT_QUERIES:
             break
+
+    if calls and errored == len(calls):
+        # fail closed: every pre-flight query failed, so nothing confirms the
+        # plan's premise; the action must not run unattended on a guess
+        print("[remediator] pre-flight: ALL queries failed -> forcing human approval")
+        for a in action_plan:
+            a["requires_approval"] = True
+        return {"tool_invocations": calls,
+                "message_ledger": [{"timestamp": datetime.datetime.utcnow().isoformat(),
+                                    "from_worker": "remediator", "kind": "note",
+                                    "content": "pre-flight: all validation queries failed; "
+                                               "premise unconfirmed, human approval required"}],
+                "budget": {"spent_iterations": 1},
+                "requires_approval": True}
 
     ledger_note = {
         "timestamp": datetime.datetime.utcnow().isoformat(),

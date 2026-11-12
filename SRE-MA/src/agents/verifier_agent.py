@@ -52,8 +52,9 @@ VERIFY_SYSTEM_PROMPT = (
     "execution: {catalog}\n"
     "- every rate()/increase() must carry a range selector like [5m]; brackets "
     "balanced\n"
-    "- labels: request/histogram metrics key on service, db pool metrics key on "
-    "db='postgres_primary'\n"
+    "- {labels}\n"
+    "- a query that matches multiple series is rejected as AMBIGUOUS: scope it "
+    "with explicit label filters until exactly one series matches\n"
     "- building no query is better than inventing one: if nothing can be grounded "
     "in the list above return an EMPTY disproof_queries list.\n"
     "Return ONLY the structured schema."
@@ -115,17 +116,24 @@ def verifier_node(state: AgentState) -> dict:
     spent_in, spent_out = 0, 0
 
     try:
+        from src.tools.agent_tool import catalog_for_active_environment
+        from src.tools.backends.registry import get_backend
+        metrics_backend = get_backend("metrics")
+        guidance = (metrics_backend.label_guidance()
+                    if metrics_backend is not None and hasattr(metrics_backend, "label_guidance")
+                    else "labels vary by environment; call list_metrics for the exact convention")
         challenge, raw = _invoke_structured(
             llm, VerificationChallenge,
             [SystemMessage(content=VERIFY_SYSTEM_PROMPT.format(
                  max_queries=VERIFIER_MAX_DISPROOF_QUERIES,
-                 catalog=", ".join(METRIC_CATALOG))),
+                 catalog=", ".join(sorted(catalog_for_active_environment())),
+                 labels=guidance)),
              HumanMessage(content=f"CLAIM: {claim}\n\nEVIDENCE SO FAR:\n{evidence or 'none'}")])
         usage = raw.usage_metadata or raw.response_metadata.get("token_usage", {})
         spent_in += usage.get("input_tokens", 0)
         spent_out += usage.get("output_tokens", 0)
 
-        results, executed = [], 0
+        results, executed, values_ok = [], 0, []
         for expr in (challenge.disproof_queries or [])[:VERIFIER_MAX_DISPROOF_QUERIES]:
             # static pre-check: reject broken PromQL before the round trip; the
             # catalog check stays off here — unknown metrics are honest no-data
@@ -146,6 +154,13 @@ def verifier_node(state: AgentState) -> dict:
                                 "result": str(out)[:120], "ts": datetime.datetime.utcnow().isoformat(),
                                 "worker": "verifier"})
             results.append(f"{expr} -> {out}")
+            # only a real measured number grounds the check: None, "no data" and
+            # error text are failures to verify, not evidence
+            try:
+                float(str(out))
+                values_ok.append(True)
+            except (TypeError, ValueError):
+                values_ok.append(False)
 
         if executed:
             verdict_challenge, raw = _invoke_structured(
@@ -174,8 +189,9 @@ def verifier_node(state: AgentState) -> dict:
             "budget": {"spent_iterations": 1},
         }
 
-    # grounded = at least one executed query returned a real (non-ERROR/non-SKIP) value
-    grounded = any(not str(r["result"]).startswith(("ERROR", "SKIP")) for r in invocations)
+    # grounded = at least one executed query returned a real measured number.
+    # None, "no data" and error text are failures to verify, not evidence.
+    grounded = any(values_ok)
     res = challenge.model_dump()
     res["grounded"] = grounded
     res["reason"] = getattr(challenge, "reason", None)

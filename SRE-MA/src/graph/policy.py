@@ -159,6 +159,18 @@ def policy_validator_node(state) -> dict:
                     print("[policy] flag flip without grounded disproof queries -> human gate")
                     a = {**a, "requires_approval": True}
         if verifier_blocked:
+            verdict = verifier_res.get("verdict")
+            grounded = verifier_res.get("grounded")
+            if verdict == "unverifiable" or grounded is False:
+                # fail closed: a claim the adversarial check could not confirm
+                # must not reach execution with an actionable plan
+                print(f"[policy] verifier verdict={verdict} grounded={grounded} "
+                      f"-> stripping plan, escalating (fail closed)")
+                rejections.append({"action": a.get("action"),
+                                   "reason": f"verifier could not confirm the diagnosis "
+                                             f"(verdict={verdict}, grounded={grounded})"})
+                validated = []
+                break
             a = {**a, "requires_approval": True}
         if kill:
             a = {**a, "requires_approval": True}

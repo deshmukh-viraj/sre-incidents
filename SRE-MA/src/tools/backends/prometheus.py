@@ -64,6 +64,14 @@ class PrometheusBackend(MetricsBackend):
         if not results:
             print(f"[prometheus] no data for: {expr[:80]}")
             return None
+        if len(results) > 1:
+            # a query that matches several series has no single answer; reading
+            # results[0] once handed an arbitrary service's value to the verifier
+            values = {r["value"][1] for r in results}
+            if len(values) == 1:
+                return float(results[0]["value"][1])
+            print(f"[prometheus] AMBIGUOUS: {len(results)} series for: {expr[:80]}")
+            return None
         value = float(results[0]["value"][1])
         print(f"[prometheus {expr[:60]} -> {value:.4f}]")
         return value
@@ -115,3 +123,26 @@ class PrometheusBackend(MetricsBackend):
             "window": params.get("window", "5m"),
             "metric": metric,
         })
+
+    def label_guidance(self) -> str:
+        """the label conventions THIS environment actually uses, for prompts
+        that author queries (the verifier was taught fintech labels and wrote
+        queries the demo stack could not answer)."""
+        if getattr(self.cfg, "label_style", "fintech") == "oteldemo":
+            return (
+                "labels: ALL metrics key on service_name=\"<service>\" (NEVER service=). "
+                "http families are http_server_request_duration_seconds_{bucket,count} "
+                "with http_response_status_code; rpc families are "
+                "rpc_server_call_duration_seconds_* with rpc_response_status_code; "
+                "flag evidence is feature_flag_evaluation_success_total"
+                "{service_name,feature_flag_key,feature_flag_result_variant}. "
+                "Every query MUST filter to the claim's target service; a query "
+                "matching multiple series is rejected as ambiguous."
+            )
+        return (
+            "labels: request/histogram metrics key on service=\"<service>\"; "
+            "db pool metrics key on db=\"postgres_primary\"; "
+            "payment metrics use payment_transactions_total. "
+            "Every query MUST filter to the claim's target service; a query "
+            "matching multiple series is rejected as ambiguous."
+        )
