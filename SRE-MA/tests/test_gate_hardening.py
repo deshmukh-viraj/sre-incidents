@@ -23,12 +23,13 @@ def _plan_state(verifier_result, target="frontend"):
     }
 
 
-def test_unverifiable_verdict_strips_the_plan():
+def test_unverifiable_verdict_reaches_the_human_gate():
+    # frozen post-mortem replay: the human sees the plan and decides; the
+    # junk-evidence problem is enforced upstream by the critic, not here
     out = policy_validator_node(_plan_state(
         {"verdict": "unverifiable", "grounded": False, "claim": "x"}))
-    assert out["plan_viable"] is False
-    assert out["action_plan"] == []
-    assert any("verifier could not confirm" in r["reason"] for r in out["policy_rejections"])
+    assert out["plan_viable"] is True
+    assert out["requires_approval"] is True
 
 
 def test_contradicted_but_grounded_goes_to_human_not_strip():
