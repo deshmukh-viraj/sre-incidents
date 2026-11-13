@@ -1,7 +1,7 @@
 """
 tools/backends/prometheus.py
 ----------------------------
-prometheus adapter. all PromQL lives here — every expression is either a
+prometheus adapter. all promql lives here every expression is either a
 capability template below or an agent-authored string validated at the tool
 boundary (src/tools/agent_tool.py) before it reaches instant().
 """
@@ -37,7 +37,7 @@ OTELDEM_METRIC_TEMPLATES = {
     "p50_latency": 'histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket{{service_name="{service}"}}[{window}])) by (le))',
     "error_rate": 'sum(rate(http_server_request_duration_seconds_count{{service_name="{service}",http_response_status_code=~"5.."}}[{window}])) / sum(rate(http_server_request_duration_seconds_count{{service_name="{service}"}}[{window}]))',
     "throttle_error_rate": 'sum(rate(http_server_request_duration_seconds_count{{service_name="{service}",http_response_status_code=~"429|504"}}[{window}])) / sum(rate(http_server_request_duration_seconds_count{{service_name="{service}"}}[{window}]))',
-    "rps": 'sum(rate(http_server_request_duration_seconds_count{{service_name="{service}"}}[1m]))',
+    "rps": 'sum(rate(http_server_request_duration_seconds_count{{service_name="{service}"}}[5m]))',
     "flag_variant_evaluations": 'sum by (feature_flag_key, feature_flag_result_variant) (increase(feature_flag_evaluation_success_total{{service_name="{service}"}}[{window}]))',
     "service_up": "up",
 }
@@ -66,7 +66,7 @@ class PrometheusBackend(MetricsBackend):
             return None
         if len(results) > 1:
             # a query that matches several series has no single answer; reading
-            # results[0] once handed an arbitrary service's value to the verifier
+            # results once handed an arbitrary service's value to the verifier
             values = {r["value"][1] for r in results}
             if len(values) == 1:
                 return float(results[0]["value"][1])
@@ -75,6 +75,28 @@ class PrometheusBackend(MetricsBackend):
         value = float(results[0]["value"][1])
         print(f"[prometheus {expr[:60]} -> {value:.4f}]")
         return value
+
+    def labeled_instant(self, expr: str, cap: int = 8) -> Optional[List[dict]]:
+        """per-series labeled read: the discovery read instant() refuses.
+        returns [{'labels': {...}, 'value': float}] sorted value-desc, capped."""
+        url = (
+            f"{self.cfg.url}/api/v1/query?"
+            f"{urllib.parse.urlencode({'query': expr})}"
+        )
+        try:
+            data = bounded_get(url, self.cfg)
+        except Exception:
+            return None
+        results = data.get("data", {}).get("result", [])
+        if not results:
+            print(f"[prometheus] no data for: {expr[:80]}")
+            return None
+        rows = [
+            {"labels": dict(r.get("metric") or {}), "value": float(r["value"][1])}
+            for r in results if r.get("value")
+        ]
+        rows.sort(key=lambda x: x["value"], reverse=True)
+        return rows[:cap]
 
     def range(
         self, expr: str, start_s: float, end_s: float, step_s: int
