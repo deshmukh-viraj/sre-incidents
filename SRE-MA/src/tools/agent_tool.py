@@ -1,8 +1,9 @@
 """
-tools/agent_tools.py
---------------------------
+tools/agent_tool.py
 
-sandboxed tool set for the DeepAgent/ReAct investigation harness.
+the tools the investigation agent can call: metric reads, log reads, trace
+reads, graph reads, plus the proposal and handoff calls that end an
+investigation.
 """
 
 import json
@@ -11,7 +12,7 @@ import threading
 import urllib.request
 import os
 from langchain_core.tools import tool
-from src.tools.prometheus_tool import _instant_query, prometheus_url
+from src.tools.prometheus_tool import _instant_query, _series_query, prometheus_url
 from src.tools.loki_tool import extract_log_summary
 from src.tools.log_tool import query_logs
 from src.tools.backends.registry import get_backend
@@ -30,12 +31,11 @@ PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
 # metric families that are simulator-app
 _APP_METRIC_PREFIXES = (
     "http_", "circuit_", "db_", "payment_", "fraud_", "slo_", "net_conntrack_",
-    # OTel demo (AWS) OTLP-native families
     "rpc_",
 )
 
 # labels/notes for the remote OTel demo stack (AWS) vs the fintech sim:
-# server-side HTTP metrics use service_name (not service=) and
+# server-side HTTP metrics use service_name
 OTEL_DEMO_CATALOG = {
     "http_server_request_duration_seconds": "{service_name,http_route,http_response_status_code} (hist/cnt)",
     "http_client_request_duration_seconds": "{service_name,server_address,http_response_status_code} (hist/cnt)",
@@ -63,7 +63,7 @@ METRIC_CATALOG = {
     "slo_error_budget_remaining_ratio": "{service,slo_name}",
     "net_conntrack_dialer_conn_failed_total": "{upstream}",
 }
-# merge in the remote-demo families so validate_expr accepts them too
+
 METRIC_CATALOG.update(OTEL_DEMO_CATALOG)
 
 
@@ -100,15 +100,15 @@ def _cached_read(key: str, run):
     if key in cache:
         print(f"[tool-cache] DUPLICATE read suppressed: {key[:80]}")
         return (f"[DUPLICATE] You already ran this exact query in this investigation. "
-                f"Recorded result: {str(cache[key])[:180]} — move to a different hypothesis.")
+                f"Recorded result: {str(cache[key])[:180]}, move to a different hypothesis.")
     result = run()
     cache[key] = result
     return result
 
 
 def validate_expr(expr: str, check_catalog: bool = True) -> tuple[bool, str]:
-    """Validate PromQL expression. Returns (is_valid, error_message).
-    check_catalog=False skips the metric-membership check (syntax only) — used
+    """validate a promql expression. returns (is_valid, error_message).
+    check_catalog=False skips the metric-membership check (syntax only), used
     by the verifier, where unknown metrics are honest no-data results and the
     read-only dispatcher is the enforcement point."""
     #check balanced brackets
@@ -124,34 +124,43 @@ def validate_expr(expr: str, check_catalog: bool = True) -> tuple[bool, str]:
         return False, "Unbalanced brackets"
     
     #check rate()/increase() have range selector
-    #find rate() and increase() calls and check if they contain a range selector [...]
+    #find rate() and increase() calls and check if they contain a range selector
     import re
     rate_pattern = r'(rate|increase)\s*\([^)]*\)'
     for match in re.finditer(rate_pattern, expr):
         call = match.group(0)
-        #check if there's a [...] inside the parentheses
+        #check if there is a range selector inside the parentheses
         inner = call[call.find('(')+1:call.rfind(')')]
         if '[' not in inner or ']' not in inner:
             return False, f"{call} missing range selector (e.g., [5m])"
     
-    #check metric exists in catalog (skippable for the verifier's syntax-only pass)
+    #check metric exists in catalog
     if check_catalog and not any(m in expr for m in METRIC_CATALOG):
         return False, f"Unknown metric. Allowed: {list(METRIC_CATALOG.keys())}"
     
     return True, ""
 
 
+def _fmt_series(row: dict) -> str:
+    """render one labeled series row as metric{labels} -> value."""
+    labels = dict(row.get("labels") or {})
+    name = labels.pop("__name__", "")
+    lbl = ",".join(f'{k}="{v}"' for k, v in sorted(labels.items()))
+    rendered = f"{name}{{{lbl}}}" if lbl else name
+    return f"{rendered} -> {row['value']}"
+
+
 @tool
 def query_prometheus_metric(expr: str) -> str:
-    """Run ONE instant PromQL query against live Prometheus and return its numeric value.
+    """run ONE instant PromQL query against live Prometheus and return its numeric value.
 
     Use for: testing a single hypothesis per call (p99, error rate, pool, breaker state...).
     Rules enforced by the tool:
-    - expr must use an EXACT metric from list_metrics/METRIC_CATALOG — never guess or
+    - expr must use an EXACT metric from list_metrics/METRIC_CATALOG, never guess or
       invent names, never prefix service names (`http_requests_total`, not `payment_...`)
     - brackets must balance; every rate()/increase() MUST include a range selector
-      (e.g. [5m]) — rate(x[5m]) is valid, rate(x) is rejected
-    - label conventions differ per environment — call list_metrics(service) for the
+      (e.g. [5m]), rate(x[5m]) is valid, rate(x) is rejected
+    - label conventions differ per environment, call list_metrics(service) for the
       exact label names this environment uses; never guess labels
 
     Returns the scalar value, or a structured ERROR explaining what to fix.
@@ -165,6 +174,33 @@ def query_prometheus_metric(expr: str) -> str:
         if val is None:
             return f"ERROR: Query '{expr}' returned no data. Use exact metric from list_metrics and verify the labels this environment uses (list_metrics lists them)."
         return f"{val}"
+    except Exception as e:
+        return f"query failed: {e}"
+
+@tool
+def query_prometheus_series(expr: str) -> str:
+    """Run ONE instant PromQL query and return its per-series values WITH labels.
+
+    Use when the answer lives in label BREAKDOWN, not a single number, e.g. which
+    feature-flag key/variant is actually evaluating (a fault-injection variant
+    shows up here), which route/status_code dominates errors. This is the read a
+    single-value query cannot give: query_prometheus_metric rejects any query
+    matching several series as ambiguous.
+
+    Rules: same as query_prometheus_metric (exact metric from list_metrics,
+    balanced brackets, range selector on rate()/increase()).
+    Rows sorted value-desc (the offending series is first), capped at 8.
+    """
+    valid, err = validate_expr(expr)
+    if not valid:
+        return f"ERROR: {err}. Allowed metrics: {list(METRIC_CATALOG.keys())}. Call list_metrics(service) for this environment's label conventions. Never use service prefixes."
+    try:
+        rows = _cached_read(f"series:{expr}", lambda: _series_query(expr))
+        if isinstance(rows, str) and rows.startswith("[DUPLICATE]"):
+            return rows
+        if not rows:
+            return f"ERROR: Query '{expr}' returned no data. Use exact metric from list_metrics and verify the labels this environment uses (list_metrics lists them)."
+        return f"n_series={len(rows)} (value-desc)\n" + "\n".join(_fmt_series(r) for r in rows)
     except Exception as e:
         return f"query failed: {e}"
 
@@ -185,7 +221,7 @@ def query_service_logs(service: str, start: str = "", end: str = "", text: str =
         level: DEBUG|INFO|WARN|ERROR|FATAL (opensearch: treated as minimum severity).
 
     HONEST OUTPUT: an unreachable backend, a timeout, or an empty window is
-    reported as 'signal unavailable: <reason>' — that means the signal could not
+    reported as 'signal unavailable: <reason>', that means the signal could not
     be obtained (or nothing matched the filters/level), NEVER 'no problem found'.
     """
     if not service or not service.strip():
@@ -222,7 +258,7 @@ def query_service_logs(service: str, start: str = "", end: str = "", text: str =
 def query_traces(service: str, lookback_minutes: int = 10, min_duration_ms: int = 0) -> str:
     """Return recent trace summaries for a service (id, root service, duration, start).
 
-    Use for: seeing the ACTUAL cross-service call path behind a symptom — which
+    Use for: seeing the ACTUAL cross-service call path behind a symptom, which
     downstream hop is slow or erroring, instead of inferring it from metric
     coincidence. Best after metrics point at a suspect hop.
 
@@ -232,7 +268,7 @@ def query_traces(service: str, lookback_minutes: int = 10, min_duration_ms: int 
         min_duration_ms: optional floor, e.g. 500 to surface only slow traces.
 
     HONEST OUTPUT: a disabled traces backend (this environment pack has none)
-    or an unreachable one is reported as 'signal unavailable: <reason>' — that
+    or an unreachable one is reported as 'signal unavailable: <reason>', that
     means the signal could not be obtained, NEVER 'no problem found'.
     """
     svc = (service or "").strip()
@@ -271,13 +307,13 @@ def get_recent_changes(service: str = "") -> str:
     mix (from live flag-evaluation metrics) and recent resolved incidents touching
     it or its upstream (KG).
 
-    Use for: the FIRST question of any investigation — most incidents are caused
+    Use for: the FIRST question of any investigation, most incidents are caused
     by a change. If a flag's variant mix shifted, that shift is your prime
     suspect; if a nearby upstream incident is active, start there.
 
     HONEST OUTPUT: each source that does not exist in this environment (e.g. no
     flag metrics in the fintech sim, no k8s events backend) is reported as
-    unavailable — never as 'nothing changed'.
+    unavailable, never as 'nothing changed'.
     """
     svc = (service or "").strip()
     sections: list = []
@@ -286,18 +322,19 @@ def get_recent_changes(service: str = "") -> str:
     try:
         expr = ("sum by (feature_flag_key, feature_flag_result_variant) "
                 "(increase(feature_flag_evaluation_success_total[10m]))")
-        val = _cached_read(f"flagmix:{expr}", lambda: _instant_query(expr))
-        if isinstance(val, str) and val.startswith("[DUPLICATE]"):
-            sections.append(f"[Flag variants] {val}")
-        elif val:
-            sections.append(f"[Flag variants, last 10m evaluations] {val}")
+        rows = _cached_read(f"flagmix:{expr}", lambda: _series_query(expr))
+        if isinstance(rows, str) and rows.startswith("[DUPLICATE]"):
+            sections.append(f"[Flag variants] {rows}")
+        elif rows:
+            mixed = "; ".join(_fmt_series(r) for r in rows)
+            sections.append(f"[Flag variants, last 10m evaluations, value-desc] {mixed}")
         else:
-            sections.append("[Flag variants] signal unavailable: no flag-evaluation metrics in this environment")
+            sections.append("[Flag variants] signal unavailable: no flag-evaluation series in the last 10m (or metrics backend unreachable)")
     except Exception as e:
         sections.append(f"[Flag variants] signal unavailable: {e}")
 
     # recent incident activity on or upstream of the service (KG; static-topology
-    # fallback covers Neo4j-outage regimes)
+    # fallback covers when Neo4j is down)
     if svc:
         try:
             recent = find_active_upstream_incident(svc, window_min=60)
@@ -331,15 +368,15 @@ def query_topology(service: str) -> str:
     try:
         return _cached_read(f"topology:{service}", lambda: query_knowledge_graph([service], ""))
     except Exception as e:
-        return f"kg query failes: {e}"
+        return f"kg query failed: {e}"
 
 @tool
 def list_metrics(service: str) -> str:
     """Return the exact, live Prometheus metric names and curated PromQL for a service
-    (the authoritative catalog — query these names, do NOT guess names).
+    (the authoritative catalog, query these names, do NOT guess names).
 
     Use as a FALLBACK whenever query_prometheus_metric errors with 'Unknown metric'
-    or 'returned no data' — this lists what actually exists in the sim cluster.
+    or 'returned no data', this lists what actually exists in the sim cluster.
     Also returns the label gotchas for this service's environment that cause
     most rejected queries.
     Returns 'no curated queries for <service>' for services that are not scraped.
@@ -359,7 +396,7 @@ def list_metrics(service: str) -> str:
     if live is not None:
         header = f"Live metric families in Prometheus: {', '.join(sorted(set(live)))}"
     else:
-        header = "Prometheus unreachable — using verified static list"
+        header = "Prometheus unreachable, using verified static list"
     if known:
         return (
             f"{header}\n"
@@ -376,35 +413,35 @@ def list_metrics(service: str) -> str:
 def lookup_runbook_chunk(query: str) -> str:
     """return the 2 most relevant runbook chunks for a query"""
     try:
-        return lookup_runbook(query=query, k=2).get("context", "no rubbook match")
+        return lookup_runbook(query=query, k=2).get("context", "no runbook match")
     except Exception as e:
         return f"runbook lookup failed: {e}"
 
 @tool
 def propose_remediation(action: str, tool: str, target_service: str, blast_radius: str,
                         flag: str = "", variant: str = "") -> str:
-    """PROPOSE (never execute) a concrete remediation. This ENDS the investigation —
+    """PROPOSE (never execute) a concrete remediation. This ENDS the investigation,
     call it once your diagnosis is complete, with the evidence-based finding in `action`.
 
     Args:
         action: full free-text diagnosis + fix rationale (evidence incl. the numbers
             you observed; keep the raw-signal numbers coherent with the live values).
-            This text is also the human's record of what was done and why — state
+            This text is also the human's record of what was done and why, state
             the diagnosis, the fix, its expected effect, and what to watch after
             it lands (same readability as an escalation reason).
         tool: MUST be one of the whitelisted write tools:
             'set_feature_flag', 'rollback_deployment', 'rolling_restart',
             'capture_diagnostics', 'notify', 'execute_kg_suggestion',
             'kubectl_patch_deployment', 'kubectl_restart_deployment', 'kubectl_scale'.
-            Anything else is REJECTED here in the loop — you immediately get the
+            Anything else is REJECTED here in the loop, you immediately get the
             allowed list back and can fix it in the same investigation instead of
             paying a full re-run later.
-        target_service: the service you are affecting — the alerted service itself or
+        target_service: the service you are affecting, the alerted service itself or
             one of its DEPENDS_ON services (use query_topology to get the list).
         blast_radius: 'pod' | 'service' | 'cluster' (your honest estimate of impact scope).
-        flag: for set_feature_flag ONLY — the feature-flag key your evidence names
+        flag: for set_feature_flag ONLY, the feature-flag key your evidence names
             (e.g. from feature_flag_evaluation_success_total{feature_flag_key=...}).
-        variant: for set_feature_flag ONLY — the variant to restore, named from your
+        variant: for set_feature_flag ONLY, the variant to restore, named from your
             evidence (e.g. the last healthy variant the flag metric shows).
 
     The proposal is validated by a critic (grounding + policy) before any execution.
@@ -423,7 +460,7 @@ def propose_remediation(action: str, tool: str, target_service: str, blast_radiu
 
 @tool
 def escalate_with_reason(reason: str) -> str:
-    """Hand the incident to the on-call human with a specific reason. TERMINAL call —
+    """Hand the incident to the on-call human with a specific reason. TERMINAL call,
     ends the investigation (use instead of ending with only a summary message).
 
     Use when: evidence is inconclusive, a required signal is unavailable (e.g.
@@ -439,6 +476,7 @@ def escalate_with_reason(reason: str) -> str:
 
 READ_TOOLS = [
     query_prometheus_metric,
+    query_prometheus_series,
     query_service_logs,
     query_traces,
     get_recent_changes,
