@@ -1,3 +1,10 @@
+"""
+tools/sre_tool.py
+-----------------
+the write side and shared helpers: collect_all_signals, lookup_runbook,
+execute_remediation, notify_slack, check_alert_status and create_jira.
+"""
+
 import os
 import uuid
 import json
@@ -45,9 +52,7 @@ def collect_all_signals(service: str) -> Dict[str, Any]:
     if os.getenv("LOG_BACKEND", "loki") == "opensearch":
         from src.tools.log_tool import query_logs
         log_result = query_logs(service)
-        #detect_patterns feeds the legacy DICT fingerprint contract that routing
-        #(routing.py:95) and deep_investigation (deep_investigation.py:86) consume
-        #via lp.get(...) — storing the aggregated list here crashed agent runs.
+
         signals["log_patterns"] = detect_patterns(log_result.get("records", []))
         signals["log_top_patterns"] = log_result.get("top_patterns", [])
         signals["error_log_summaries"] = log_result.get("sample_lines", [])
@@ -61,7 +66,7 @@ def collect_all_signals(service: str) -> Dict[str, Any]:
               f"patterns={len(signals['log_top_patterns'])}")
         return signals
 
-    #loki logs — pre-built queries owned by the logs adapter
+    #loki logs
     logs = get_backend("logs")
     if logs is not None:
         error_logs = logs.log_capability("service_errors", service=service, limit=20)
@@ -89,7 +94,7 @@ def lookup_runbook(query: str, runbook_id: Optional[str] = None, k: int = 3) -> 
     print(f"[sre_tools] FAISS lookup: '{query[:50]}' runbook_id={runbook_id}")
 
     try:
-        from rag.retriever import retrieve, format_chunks_for_llm
+        from src.rag.retriever import retrieve, format_chunks_for_llm
         docs = retrieve(query=query, k=k, runbook_id=runbook_id)
         chunks = [
             {
@@ -119,14 +124,15 @@ def lookup_runbook(query: str, runbook_id: Optional[str] = None, k: int = 3) -> 
 
 
 @observe(name="execute_remediation")
-def execute_remediation(action: str, tool: str, params: Dict[str, Any]) -> Dict[str, Any]:
+def execute_remediation(action: str, tool: str, params: Dict[str, Any],
+                        environment: str = "") -> Dict[str, Any]:
     """
     run the fix.
     if dry_run is on, just print what we would do.
     otherwise, actually hit the endpoints.
     """
     ts = datetime.now(timezone.utc).isoformat()
-    print(f"[sre_tools] {'[DRY-RUN] ' if DRY_RUN else ''}execute: {tool} — {action[:50]}")
+    print(f"[sre_tools] {'[DRY-RUN] ' if DRY_RUN else ''}execute: {tool} - {action[:50]}")
 
     if DRY_RUN:
         return {
@@ -137,9 +143,7 @@ def execute_remediation(action: str, tool: str, params: Dict[str, Any]) -> Dict[
         }
 
     try:
-        # remote (AWS OTel demo) remediation: the affected stack is not the local
-        # fintech simulator, so there is nothing to POST to simulator:8001 — flags
-        # are flipped through the aws-tunnel admin bridge instead.
+       
         if tool == "set_feature_flag" and params.get("remote"):
             admin_url = os.getenv("AWS_ADMIN_URL", "http://aws-tunnel:8085")
             req = urllib.request.Request(
@@ -160,6 +164,15 @@ def execute_remediation(action: str, tool: str, params: Dict[str, Any]) -> Dict[
             return {
                 "success": False,
                 "error": f"remote set-flag rejected: {json.dumps(body)[:200]}",
+                "dry_run": False,
+                "executed_at": ts,
+            }
+
+        if environment == "aws-oteldemo" and tool not in ("notify", "capture_diagnostics"):
+            return {
+                "success": False,
+                "error": (f"no remote executor for tool '{tool}' on environment 'aws-oteldemo' "
+                          f"(only set_feature_flag with flag+variant executes remotely)"),
                 "dry_run": False,
                 "executed_at": ts,
             }
@@ -191,7 +204,7 @@ def notify_slack(
     colors = {"info": "#36a64f", "warning": "#ff9900", "critical": "#ff0000"}
     emojis = {"info": ":white_check_mark:", "warning": ":warning:", "critical": ":rotating_light:"}
 
-    title = f"{emojis.get(severity, ':bell:')} SRE Agent — {severity.upper()}"
+    title = f"{emojis.get(severity, ':bell:')} SRE Agent - {severity.upper()}"
     if incident_id:
         title += f" [{incident_id}]"
 
@@ -236,7 +249,7 @@ def check_alert_status(alert_name: str) -> str:
                 return "firing"
         
         #if the alert is not found in alertmanager at all, it has resolved (the
-        # query succeeded and named alerts are absent — that IS resolution).
+        # query succeeded and named alerts are absent).
         # 'unknown' is reserved for AM query failures, so the verify loop can
         # fall back to prometheus metrics instead of trusting a dead query.
         print(f"[sre_tool] Alert {alert_name} not found in alertmanager -> resolved")
