@@ -1,16 +1,20 @@
 """
 tools/backends/base.py
 ----------------------
-uniform contracts for observability backends + the bounds every backend call runs under.
+the shared shape of every observability backend, plus the bounds each
+backend call runs under.
 
-spec contract:
-- graph nodes and prompt templates never author backend query dialects; they call
-  capability methods here and adapters translate to the native dialect (PromQL,
-  LogQL, TraceQL, ...).
-- adapters return normalized structures (scalar values, series, log rows, spans).
-- supporting a new corporate environment = add an adapter module + a pack in
-  config/environments.yaml. nodes, prompts and other adapters stay untouched.
-- every adapter is read-only by construction: only GET requests leave this layer.
+How it works:
+- graph nodes and prompt templates never write PromQL, LogQL or TraceQL
+  themselves. They call capability methods here, and the adapter for the
+  active backend translates them to its own query language.
+- adapters return normalized data: plain scalar values, series with
+  labels, log rows, spans.
+- adding a new corporate environment means adding one adapter module and
+  one pack in config/environments.yaml. Nodes, prompts and the other
+  adapters stay untouched.
+- every adapter is read-only: only GET requests leave this layer, and
+  each call runs under size and time bounds.
 """
 
 import json

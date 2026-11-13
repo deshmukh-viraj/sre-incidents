@@ -1,13 +1,9 @@
 """
 tools/log_tool.py
 -----------------
-logs backend for the AWS otel-demo regime (LOG_BACKEND=opensearch): reads the
-demo's OpenSearch log indices (otel-logs-*) through the ssh tunnel and applies
-the honest query_logs contract:
-- <= 200 lines scanned per call (row cap)
-- returns top log patterns + sample lines, never raw dumps
-- 'signal unavailable' honesty: when the backend or index has nothing, the
-  result says so explicitly (available=False + reason) instead of empty success
+reads the AWS otel-demo logs from OpenSearch over the ssh tunnel
+(indices otel-logs-*). query_logs only reports what the index actually
+holds; it never invents entries.
 """
 
 import os

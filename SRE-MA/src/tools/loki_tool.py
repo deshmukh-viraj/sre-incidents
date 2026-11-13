@@ -1,9 +1,12 @@
 """
 tools/loki_tool.py
 ------------------
-log capability facade. LogQL lives in the backend adapter
-(src/tools/backends/loki.py); this module keeps the historical function
-signatures used across the repo.
+the front door for log queries. The actual LogQL lives in the loki
+backend adapter (src/tools/backends/loki.py); this module maps a log
+question to the right query and returns plain results.
+
+The function names and signatures here are the ones the rest of the
+repo has always used, so callers and tests keep working.
 """
 
 import os
@@ -13,10 +16,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.tools.backends.registry import get_backend  # noqa: E402
+from src.tools.backends.registry import get_backend  
 
-LOKI_URL = os.getenv("LOKI_URL", "http://localhost:3100")  # deprecated; pack url wins
-
+LOKI_URL = os.getenv("LOKI_URL", "http://localhost:3100") 
 
 def query_loki(
     logql: str,

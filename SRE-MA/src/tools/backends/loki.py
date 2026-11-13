@@ -1,7 +1,7 @@
 """
 tools/backends/loki.py
 ----------------------
-loki adapter. LogQL selectors and the pre-built log queries live here only.
+loki adapter. logql selectors and the pre-built log queries live here only.
 """
 
 import json

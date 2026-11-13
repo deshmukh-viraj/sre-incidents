@@ -1,7 +1,9 @@
 """
 tools/backends/tempo.py
 -----------------------
-tempo adapter (TraceQL search). the trace query syntax lives here only.
+reads traces from Grafana Tempo using TraceQL search. The TraceQL syntax
+lives here and nowhere else, so swapping the trace backend (for example
+to the jaeger adapter) leaves every caller unchanged.
 """
 
 import time

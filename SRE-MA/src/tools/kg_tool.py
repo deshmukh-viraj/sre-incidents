@@ -1,8 +1,10 @@
 """
 tools/kg_tool.py
 ----------------
-ask neo4j for graph info.
-we use this to figure out dependencies, docs, and what fixed stuff before.
+asks the local neo4j knowledge graph for information. During an
+investigation the agent uses it to see which services depend on which,
+to find docs about a service, and to check what fixed similar
+incidents before.
 """
 
 import os
@@ -59,11 +61,11 @@ SERVICE_METRICS = {
 }
 # per-environment label gotchas: the fintech-sim conventions and the otel-demo
 # conventions differ (service= vs service_name=, status_code vs
-# http_response_status_code) — showing the wrong block steers every query
-# away from live data, so list_tools pick by service.
+# http_response_status_code), showing the wrong block steers every query
+# away from live data, so list_metrics picks by service.
 _FINTECH_LABEL_NOTES = (
     "LABEL GOTCHAS: db pool metrics use db=\"postgres_primary\" (NOT service=). "
-    "card_rails/postgres are not scraped services — card_rails appears only as the "
+    "card_rails/postgres are not scraped services, card_rails appears only as the "
     "upstream label on circuit_breaker_state. Always use the exact names/labels above."
 )
 _OTEL_LABEL_NOTES = (
@@ -82,7 +84,7 @@ def label_notes_for(service: str) -> str:
 
 
 # curated PromQL for the OpenTelemetry demo (AWS) services: same shape as the
-# fintech map — keyed by service, used by list_metrics and the KG seeder.
+# fintech map, keyed by service, used by list_metrics and the KG seeder.
 OTEL_DEMO_SERVICE_METRICS = {
     "frontend": [
         'http_server_request_duration_seconds_bucket{service_name="frontend"}',
@@ -110,8 +112,6 @@ OTEL_DEMO_SERVICE_METRICS = {
     "ad": ['rpc_server_call_duration_seconds_bucket{service_name="ad"}'],
 }
 
-# one catalog: environments never collide on service names
-# (payment_gateway vs cart/checkout), so per-service selection is unambiguous.
 SERVICE_METRICS = {**SERVICE_METRICS, **OTEL_DEMO_SERVICE_METRICS}
 
 try:
@@ -140,7 +140,7 @@ except Exception as e:
 
 def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str] = None) -> str:
     if driver is None:
-        return "Knowledge Graph unavailable — Neo4j not running."
+        return "Knowledge Graph unavailable, Neo4j not running."
 
     context_sections = []
     try:
@@ -156,7 +156,7 @@ def query_knowledge_graph(affected_services: List[str], alert_name: Optional[str
                         if dep.get("doc_summary"):
                             context_sections.append(f"[Docs: {dep['dependency']}] {dep['doc_summary']}")
                 else:
-                    context_sections.append(f"[Topology] {service} has no downstream dependencies — it is likely a root node (database or external API).")
+                    context_sections.append(f"[Topology] {service} has no downstream dependencies, it is likely a root node (database or external API).")
 
                 #upstream services
                 upstream_result = session.run("MATCH (caller:Service)-[:DEPENDS_ON]->(s:Service {name: $service}) RETURN caller.name AS caller", service=service)
@@ -235,7 +235,7 @@ def append_past_incident(
     severity: Optional[str] = None,
 ) -> None:
     if driver is None:
-        print("[kg_tool] cannot append incident — Neo4j unavailable")
+        print("[kg_tool] cannot append incident, Neo4j unavailable")
         return
     try:
         with driver.session() as session:
@@ -287,7 +287,7 @@ def query_past_incident_only(service: str, alert_name: str) -> Optional[dict]:
 
 def query_recent_resolved_incident(alert_name: str, service: str) -> Optional[dict]:
     """
-    gate-5: finds if this alert was recently solved as agent_remediated
+    finds whether this alert was recently solved by the agent (agent_remediated)
     """
     if driver is None: return None
     try:
@@ -308,7 +308,7 @@ def query_recent_resolved_incident(alert_name: str, service: str) -> Optional[di
 
 def revoke_credit(incident_id: str, new_incident_id: str) -> None:
     """
-    gate-5: atomically revokes the credit for old inicident and links new one asrecurrence
+    atomically revokes the credit from the old incident and links the new one as a recurrence
     """
     if driver is None: return 
     tx = None
@@ -369,12 +369,12 @@ def get_dependencies(service: str, hops: int=2) -> List[str]:
             )
             return [r["name"] for r in result]
     except Exception as e:
-        print(f"[kg_tool] get_dependencies({service}, hops={hops}) failed: {e} — using static topology fallback")
+        print(f"[kg_tool] get_dependencies({service}, hops={hops}) failed: {e}, using static topology fallback")
         return _fallback_deps(service, hops)
 
 
-# static topology fallback (same data kg_ingest seeds): keeps target-binding
-# verification working when Neo4j is unreachable — e.g. the sandbox regime,
+# static topology fallback (same data kg_ingest seeds) keeps target-binding
+# verification working when Neo4j is unreachable
 # where the agent runs far from the demo stack and no KG store exists.
 _STATIC_FALLBACK_TOPOLOGY: Dict[str, List[str]] = {
     # fintech sim (kg_ingest.DEPENDENCIES)

@@ -1,12 +1,12 @@
 """
 tools/registry.py
 -----------------
-Tool Librarian (TASK A): one ToolSpec per agent tool, seeded from the live
-READ_TOOLS / ALL_TOOLS lists in agent_tool.py. Pure python, zero LLM.
+one ToolSpec per agent tool, seeded from the READ_TOOLS / ALL_TOOLS lists
+in agent_tool.py. No LLM involved.
 
-The registry is the roster's single source of tool metadata (name, description,
-read_only, timeout, row_cap). Dispatcher (dispatcher.py) is the single
-enforcement site for timeouts and row caps.
+The registry holds the tool metadata every agent sees (name, description,
+read_only, timeout, row_cap). dispatcher.py is the one place that enforces
+timeouts and row caps.
 """
 
 from dataclasses import dataclass
@@ -34,8 +34,8 @@ def _callable_of(tool: Any) -> Optional[Callable]:
 
 def build_registry(tools: List[Any] = None) -> Dict[str, ToolSpec]:
     """build ToolSpecs from langchain @tool objects (or anything with
-    .name/.description/.func). read_only is derived from the READ_TOOLS list —
-    the seed roster must never disagree with the live tool file."""
+    .name/.description/.func). read_only is derived from the READ_TOOLS list,
+    so the registry can never disagree with the live tool file."""
     tools = tools if tools is not None else ALL_TOOLS
     read_only_names = {t.name for t in READ_TOOLS}
     specs: Dict[str, ToolSpec] = {}

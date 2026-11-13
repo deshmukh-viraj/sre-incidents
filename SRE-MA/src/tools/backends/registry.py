@@ -3,7 +3,7 @@ tools/backends/registry.py
 --------------------------
 environment pack loader. SRE_ENVIRONMENT selects the pack in
 config/environments.yaml; each pack names its metrics/logs/traces backend,
-endpoint and bounds. swapping a backend or environment is a config change —
+endpoint and bounds. swapping a backend or environment is a config change
 no node, prompt or adapter edit.
 """
 
@@ -15,7 +15,7 @@ import yaml
 
 from src.tools.backends.base import BackendConfig, LogsBackend, MetricsBackend, TracesBackend
 
-_ADAPTERS = {}  # populated lazily so importing this module never imports heavy deps
+_ADAPTERS = {}  
 
 PACK_FILE = Path(__file__).resolve().parents[3] / "config" / "environments.yaml"
 
@@ -70,7 +70,7 @@ def get_backend(kind: str) -> Optional[Any]:
         timeout_s=float(section.get("timeout_s", 10.0)),
         max_rows=int(section.get("max_rows", 100)),
         enabled=True,
-        # style is pack-wide; a backend section may still override it
+     
         label_style=section.get("label_style") or pack.get("label_style", "fintech"),
     )
     backend = _adapter_class(kind, cfg.adapter)(cfg)

@@ -1,13 +1,14 @@
 """
 tools/backends/jaeger.py
 ------------------------
-jaeger adapter (TracesBackend contract). The otel-demo instance runs Jaeger,
-not Tempo; the trace query syntax lives here only, same rule as tempo.py.
+reads traces from the Jaeger instance that the otel-demo ships (the demo
+runs Jaeger, not Tempo). This adapter speaks Jaeger's REST API:
 
-Jaeger query API: GET /api/traces?service=<svc>&lookback=<dur>&limit=<n>
-returns data[].traceID with spans (duration in MICROseconds) and a processes
-map (processID -> {serviceName, ...}). Normalized to the same shape the
-tempo adapter returns so callers stay unchanged.
+  GET /api/traces?service=<svc>&lookback=<dur>&limit=<n>
+
+Jaeger reports span durations in microseconds; the adapter normalizes
+them to milliseconds and returns spans in the same shape as the tempo
+adapter, so callers don't care which trace backend answered.
 """
 
 import time

@@ -1,6 +1,6 @@
 """
-tools/backends — adapter interfaces for observability backends.
-see registry.get_backend(kind) for the active environment's instances.
+tools/backends: adapter interfaces for the observability backends.
+registry.get_backend(kind) returns the instances for the active environment.
 """
 
 from src.tools.backends.base import (

@@ -1,13 +1,13 @@
 """
 tools/dispatcher.py
 -------------------
-Tool Librarian (TASK A) dispatch surface: catalog_search / explain_tool / run_tool.
-Pure python, zero LLM.
+the tool librarian. The agent can search the tool catalog (catalog_search),
+ask what a tool does (explain_tool) and run a tool by name (run_tool).
 
-run_tool is THE one place tool timeouts and result row caps are enforced
-(single enforcement site, see _cap_rows and the timeout handling below).
-Read-only enforcement: non-read tools are rejected unless the caller passes
-allow_write=True (reserved for governed paths).
+run_tool is the one place that enforces tool timeouts and result row caps,
+so no caller has to worry about a tool running away or flooding the context.
+Non-read tools are rejected unless the caller passes allow_write=True,
+which is reserved for the governed paths.
 """
 
 import concurrent.futures
@@ -88,9 +88,7 @@ def run_tool(
         future = pool.submit(spec.callable, **args)
         result = future.result(timeout=timeout)
     except concurrent.futures.TimeoutError:
-        # ponytail: the runaway thread keeps running (threads are unkillable);
-        # its own socket timeouts bound the leak. Upgrade path: killable
-        # subprocess dispatch per tool.
+
         return f"ERROR: tool '{name}' timed out after {timeout}s"
     except TypeError as e:
         return f"ERROR: tool '{name}' bad args: {e}"

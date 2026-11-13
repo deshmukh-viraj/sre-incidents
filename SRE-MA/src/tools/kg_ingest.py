@@ -1,11 +1,13 @@
 """
-populates the neo4j knowledge graph with:
-  1. service topology
-  2. alerts mapping
-  3. public docs
-  4. known remediations
+Fills the local neo4j knowledge graph with everything the agents need to
+look up later:
+  1. which services talk to which (service topology)
+  2. which alerts belong to which services
+  3. the public docs
+  4. known remediations, i.e. what fixed similar incidents before
 
-run once at setup or when adding new stuff.
+Run it once at setup, or again whenever the topology, docs or known fixes
+change. kg_tool.py is what agents use to query the result.
 """
 
 import os
@@ -20,9 +22,6 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 
 #service topology
-# Names must match EXACTLY what your simulator uses in metrics_generator.py
-# and what _infer_service() returns in nodes.py
-
 SERVICES = [
     "api_gateway",
     "payment_gateway",
@@ -51,7 +50,7 @@ DEPENDENCIES = [
     ("account_ledger", "postgres_primary"),
     ("account_ledger", "postgres_replica"),
     ("notification_service", "account_ledger"),
-    # opentelemetry demo stack (sandbox regime) — real topology from the
+    # opentelemetry demo stack (sandbox): real topology from the
     # demo compose so KG-backed binding works against oteldemo incidents
     ("frontend", "cart"),
     ("frontend", "checkout"),
@@ -123,14 +122,14 @@ ALERTS = [
         "service": "payment_gateway",
         "severity": "critical",
         "runbook_id": "RB-001",
-        "description": "p99 latency above 3.0s — SLO breach",
+        "description": "p99 latency above 3.0s, SLO breach",
     },
     {
         "name": "SLOErrorBudgetBurnRateFast",
         "service": "payment_gateway",
         "severity": "critical",
         "runbook_id": "RB-001",
-        "description": "Error budget burning at 14.4x — exhausts in 1 hour",
+        "description": "Error budget burning at 14.4x, exhausts in 1 hour",
     },
     {
         "name": "CircuitBreakerOpen",
@@ -151,7 +150,7 @@ ALERTS = [
         "service": "account_ledger",
         "severity": "critical",
         "runbook_id": "RB-004",
-        "description": "Connection pool above 98% — new connections rejected",
+        "description": "Connection pool above 98%, new connections rejected",
     },
     {
         "name": "SlowQueryDetected",
@@ -165,14 +164,14 @@ ALERTS = [
         "service": "api_gateway",
         "severity": "critical",
         "runbook_id": "RB-003",
-        "description": "Request rate 10x above hourly average — possible attack",
+        "description": "Request rate 10x above hourly average, possible attack",
     },
     {
         "name": "AuthenticationFailureRateSpiking",
         "service": "api_gateway",
         "severity": "warning",
         "runbook_id": "RB-003",
-        "description": "Auth failures above 5 per second — credential stuffing",
+        "description": "Auth failures above 5 per second, credential stuffing",
     },
     {
         "name": "PaymentDeclineRateAbnormal",
@@ -198,7 +197,7 @@ ALERTS = [
 ]
 
 #known remediations per runbook
-#these are seeded once — PastIncidents add real ones over time
+#PastIncidents add real ones over time
 REMEDIATIONS = [
     {
         "id": "REM-001",
