@@ -11,35 +11,36 @@ services:
     volumes:
       - ${HOME}/.ssh/aws-sandbox.pem:/key/aws-sandbox.pem:ro
 
-  # aws-tunnel: adds the two directions prom-tunnel does not provide.
-  # 1) reverse forward: AWS Prometheus (--alertmanagers target 172.18.0.1:19093,
-  #    the AWS docker-bridge gateway IP) -> here -> container `alertmanager:9093`.
-  # 2) admin bridge (aws-admin/admin_server.py): agent's authorized
-  #    set_feature_flag remediation writes the demo flag file on AWS over SSH.
-  # 3) browser forward: WSL localhost:${REMOTE_PROM_UI_PORT} -> AWS Prometheus UI.
-  # 4) logs backend forward: WSL/agent -> the otel-demo's OpenSearch (logs index),
-  #    host-published port discovered at boot via `docker compose ps` on the VM.
+  # aws-tunnel: adds the forwards prom-tunnel does not provide:
+  # 1) reverse forward: AWS Prometheus -> here -> alertmanager:9093
+  # 2) admin bridge: agent's set_feature_flag writes the demo flag file on AWS
+  # 3) browser forward: WSL -> AWS Prometheus UI
+  # 4) logs backend: WSL/agent -> otel-demo OpenSearch (port discovered at boot)
+  # 5) knowledge-graph: agent -> VM's neo4j (in-network only)
   aws-tunnel:
     image: alpine:3.20
     command: >
       sh -c "apk add --no-cache openssh-client python3;
-      (ADMIN_PORT=${AWS_ADMIN_PORT} VM_IP=${VM_IP} python3 /admin/admin_server.py) &
+      (ADMIN_PORT=${AWS_ADMIN_PORT} VM_IP=${VM_IP} SSH_TARGET=ubuntu@${VM_IP} SSH_KEY=/key/aws-sandbox.pem python3 /admin/admin_server.py) &
       OP=$$(python3 /admin/discover_opensearch_port.py 2>/dev/null || echo 32775);
       echo \"[aws-tunnel] opensearch host-published port: $$OP\";
+      GF=32787;
+      echo \"[aws-tunnel] grafana host-published port: $$GF (hardcoded; bump after AWS stack restart)\";
+      ssh -i /key/aws-sandbox.pem -o StrictHostKeyChecking=accept-new ubuntu@${VM_IP} \"sudo fuser -k ${AWS_ALERT_RTNL_PORT}/tcp || true\";
       ssh -N -i /key/aws-sandbox.pem
       -o StrictHostKeyChecking=accept-new
       -o ServerAliveInterval=30
       -o ExitOnForwardFailure=yes
       -L 0.0.0.0:${REMOTE_PROM_UI_PORT}:localhost:9090
       -L 0.0.0.0:${OPENSEARCH_FWD_PORT:-9200}:localhost:$$OP
+      -L 0.0.0.0:7687:localhost:7687
       -R ${AWS_ALERT_RTNL_HOST}:${AWS_ALERT_RTNL_PORT}:alertmanager:9093
       ubuntu@${VM_IP}"
     volumes:
       - ${HOME}/.ssh/aws-sandbox.pem:/key/aws-sandbox.pem:ro
       - ./aws-admin/admin_server.py:/admin/admin_server.py:ro
       - ./aws-admin/discover_opensearch_port.py:/admin/discover_opensearch_port.py:ro
-    # WSL-browser access to the AWS Prometheus UI (remote-data view) - the ssh
-    # forward binds the port in-container and this publishes it on the host
+  
     ports:
       - "127.0.0.1:${REMOTE_PROM_UI_PORT}:${REMOTE_PROM_UI_PORT}"
       # WSL access to the demo OpenSearch (agent queries it in-docker as
@@ -52,8 +53,11 @@ services:
       - DRY_RUN=0
       # logs backend for log_tool/query_service_logs/query_traces: the active
       # target is the AWS otel-demo -> opensearch via the tunnel. Set
-      # LOG_BACKEND=loki (in .env or host env) to investigate the local
-      # fintech stack instead.
+      # LOG_BACKEND=loki (in .env or host env) to investigate the local simulator.
+
       - LOG_BACKEND=${LOG_BACKEND:-opensearch}
       - LOG_OPENSEARCH_URL=http://aws-tunnel:${OPENSEARCH_FWD_PORT:-9200}
+      - NEO4J_URI=bolt://aws-tunnel:7687
+      - NEO4J_USERNAME=${NEO4J_REMOTE_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_REMOTE_PASSWORD}
 
