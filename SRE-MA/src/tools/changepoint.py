@@ -1,15 +1,17 @@
 """
 tools/changepoint.py
 --------------------
-deterministic onset detection for the detector node (Bet 2). pure numpy,
-zero LLM: given a metric's time series, find the single strongest LEVEL SHIFT
-and report its onset time. the investigation prompt surfaces these as
-CHANGE-POINT EVIDENCE — a root-cause narrative must align with the onset,
-which fabricated (injected) narratives cannot fake.
+Finds the exact moment a metric unexpectedly jumps or drops.
 
-conservative by design: a series that is too short, too flat, or whose best
-split is not a clear multi-sigma level shift yields None (no hint), never a
-guess.
+wow it helps:
+when an incident happens, this tool looks at the metric history and pinpoints
+the exact timestamp when the issue started (the level shift). The AI agent uses
+this timestamp as hard evidence to verify root causes, so any explanation that
+doesn't match this start time can be ruled out.
+
+safe and cautious:
+if the data is too short, mostly flat, or the change is too small to be certain,
+it returns None instead of guessing.
 """
 
 from typing import Any, Dict, List, Optional
@@ -17,7 +19,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 MIN_SAMPLES = 10          # below this, detection is noise
-MIN_SPLIT_FRACTION = 0.2  # ignore splits in the first/last 20% (edge effects)
+MIN_SPLIT_FRACTION = 0.2  # ignore splits in the first/last 20% 
 MIN_SIGMA = 3.0           # required shift size in pooled-sigma units
 
 
@@ -25,8 +27,7 @@ def detect_changepoint(
     series: List[Any],
     min_sigma: float = MIN_SIGMA,
 ) -> Optional[Dict[str, Any]]:
-    """strongest level shift in [(unix_ts, value), ...]. None when no clear shift.
-
+    """
     returns {t_onset, onset_iso, minutes_ago, sigma, direction, before, after}
     where t_onset is the first timestamp of the NEW level (the split point).
     """
@@ -43,7 +44,7 @@ def detect_changepoint(
     if hi <= lo:
         return None
 
-    # CUSUM-lite: scan splits, score |mean_after - mean_before| / pooled sigma
+    #scan splits, score |mean_after - mean_before|
     prefix_sum = np.cumsum(vals)
     total = prefix_sum[-1]
     best_score, best_k = 0.0, None
@@ -63,7 +64,7 @@ def detect_changepoint(
     if best_k is None or best_score < min_sigma:
         return None
 
-    # the level must ALSO sit clear of the baseline spread (a wide-flat series
+    #the level must ALSO sit clear of the baseline spread (a wide-flat series
     # can produce a decent normalized score with a trivially small shift)
     base = vals[:best_k]
     if abs(best_after - best_before) < 2.0 * float(np.std(base) + 1e-12):
@@ -72,10 +73,12 @@ def detect_changepoint(
     onset_ts = ts[best_k]
     import datetime as dt
     return {
-        "t_onset": onset_ts,
+        # float(): round() on a numpy scalar stays numpy and the msgpack
+        # checkpointer cannot serialize it
+        "t_onset": float(onset_ts),
         "onset_iso": dt.datetime.fromtimestamp(onset_ts, dt.timezone.utc).isoformat(timespec="seconds"),
         "minutes_ago": max(0, int((ts[-1] - onset_ts) / 60.0)),
-        "sigma": round(best_score, 2),
+        "sigma": round(float(best_score), 2),
         "direction": "up" if best_after > best_before else "down",
         "before": round(float(best_before), 6),
         "after": round(float(best_after), 6),
