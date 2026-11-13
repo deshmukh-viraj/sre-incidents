@@ -1,5 +1,5 @@
 services:
-#fake world
+# local fintech simulation stack (simulator, prometheus, alertmanager)
   simulator:
     image: insideviraj/fintech-sre-generator:latest
     container_name: fintech-sre-simulator
@@ -45,9 +45,12 @@ services:
       - PROMETHEUS_URL=http://prometheus:9090
       - LOKI_URL=http://loki:3100
       - NEO4J_URI=bolt://neo4j:7687
+      - SRE_ENVIRONMENT=sandbox
+      - PYTHONUNBUFFERED=1
     volumes:
       - ./SRE-MA/src:/app/src
       - ./SRE-MA/runbooks:/app/runbooks
+      - ./SRE-MA/config:/app/config
     depends_on:
       - prometheus
       - alertmanager
