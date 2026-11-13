@@ -223,6 +223,13 @@ def _verify_recovery(
     pre_p99 = pre_metrics.get("p99_latency_s")
     pre_error = pre_metrics.get("error_rate")
 
+    def _signals():
+        s = collect_incident_signals(service, window="1m")
+        if s.get("p99_latency_s") is None and s.get("error_rate") is None:
+            # 1m windows go nodata on sparse span-metric backends: widen once
+            s = collect_incident_signals(service, window="5m")
+        return s
+
     log_stage(alert_name, "VERIFICATION_GRACE", f"waiting {grace_period}s for action to propagate...")
     time.sleep(grace_period)
 
@@ -238,7 +245,7 @@ def _verify_recovery(
         am_state = check_alert_status(alert_name)
         if am_state not in ("firing", "unknown"):
             log_stage(alert_name, "AM_RESOLVED", f"Alertmanager state={am_state}")
-            signals = collect_incident_signals(service, window="1m")
+            signals = _signals()
             curr_p99 = signals.get("p99_latency_s")
             curr_error = signals.get("error_rate")
 
@@ -261,7 +268,7 @@ def _verify_recovery(
 
                 #primary: prometheus metric comparison 
         log_stage(alert_name, "VERIFY_METRICS", f"querying {service} metrics...")
-        signals = collect_incident_signals(service, window="1m")
+        signals = _signals()
         curr_p99 = signals.get("p99_latency_s")
         curr_error = signals.get("error_rate")
        
@@ -410,6 +417,7 @@ def execute_node(state: AgentState) -> dict:
                 action=action["action"],
                 tool=action["tool"],
                 params=params,
+                environment=(state.get("raw_signals") or {}).get("environment", ""),
             )
 
         # gate-2: executin and target binding
