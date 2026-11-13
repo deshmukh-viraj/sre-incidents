@@ -1,12 +1,12 @@
-# environment pack: one block per target environment.
-# the agent only queries backends enabled here; bounds (timeout_s, max_rows) are
-# enforced by the backend layer (src/tools/backends/) on every call.
-# swap an endpoint or add an environment here — never in graph nodes or prompts.
-
+# environment packs for the SRE agent
+# each pack names the observability backends, their endpoints, bounds, and the
+# service catalog (which services are stateless, stateful, or monitoring).
+# the agent loads the pack selected by SRE_ENVIRONMENT at startup.
+#
+# fintech_sim: local fintech simulation stack (simulator, prometheus, loki)
+# sandbox:     AWS OpenTelemetry demo stack, reached via SSH tunnels
+#
 fintech_sim:
-  # service tiers: one catalog entry per service — new services need a line
-  # here, not code. stateless_app = auto-eligible, stateful_data/monitoring =
-  # always human gate; a service missing from the catalog defaults to the gate.
   service_catalog:
     payment_gateway: stateless_app
     api_gateway: stateless_app
@@ -62,7 +62,7 @@ sandbox:
   label_style: oteldemo
   metrics:
     adapter: prometheus
-    url: http://localhost:9091
+    url: http://prom-tunnel:9090
     timeout_s: 10.0
     max_rows: 100
   logs:
@@ -72,9 +72,7 @@ sandbox:
     max_rows: 50
   traces:
     adapter: jaeger
-    enabled: false   # the demo's Jaeger is v2.21 (v3 metadata API only; no
-                     # traces-search route). Re-enable when a Tempo container
-                     # or a v3-streaming-capable Jaeger lands on the instance.
+    enabled: false  
     url: http://localhost:3200
     timeout_s: 10.0
     max_rows: 20
