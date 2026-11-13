@@ -1,3 +1,10 @@
+"""
+graph/orchestrator.py
+
+builds the incident state graph and runs it end to end, checkpointed per
+incident id.
+"""
+
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -63,10 +70,10 @@ def build_graph() -> StateGraph:
     graph.add_edge("detector", "diagnoser")
 
     # diagnoser -> route based on confidence. NOTE: the "llm_diagnoser" route
-    # name is a lie-free contract here only in the table — for novel incidents
-    # it is deliberately redirected to the deep agent; llm_diagnoser (one-shot
-    # LLM) itself stays reachable only from route_after_investigation when the
-    # deep harness degrades (harness failure / budget exhausted -> pending_llm).
+    # name is only a label in this table. Novel incidents are routed to the
+    # deep investigation agent; the one-shot llm_diagnoser node itself is
+    # only reached from route_after_investigation when the deep harness
+    # fails or the budget runs out (pending_llm).
     graph.add_conditional_edges("diagnoser", route_after_diagnosis, {
             "remediator": "remediator",
             "llm_diagnoser": "deep_investigation",
@@ -117,13 +124,13 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges("human_gate", route_after_human_gate, {
         "execute": "execute",
         "escalate": "escalate",
-        # natural calm: alert self-resolved during the pre-page soak — nothing to execute
+        # natural calm: alert self-resolved during the pre-page soak, nothing to execute
         "end_resolved": "communicator",
     })
     
     graph.add_conditional_edges("execute", route_after_verification, {
         "end_resolved": "communicator",
-        # D-02: one executed-but-ineffective action re-enters investigation
+        # one executed but ineffective action re-enters investigation
         # with the post-action evidence before the human gate
         "re_investigate": "deep_investigation",
         "escalate_execution": "escalate",
@@ -188,9 +195,9 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
 
     result = app.invoke(state, config=config)
 
-    #HITL: when the graph stopped at an interrupt() (human approval
-    #invoke returns the partial state — the run is PAUSED, not
-    # finished. report the interim picture instead of a completed resolution.
+    #human in the loop: when the graph stopped at an interrupt() (human approval),
+    #invoke returns the partial state. The run is paused, not finished, so
+    # report the interim picture instead of a completed resolution.
     paused = bool(app.get_state(config).next)
     if paused:
         result["resolution_status"] = ResolutionStatus.WAITING_FOR_APPROVAL.value
@@ -208,7 +215,7 @@ def run_incident(incident_id: str, raw_signals: dict, config: dict = None) -> di
         except Exception as e:
             print(f"[langfuse] trace url unavailable: {e}")
         print(f"\n{'='*60}")
-        print(f"PAUSED: {incident_id} — awaiting human approval (approve/reject via /approve)")
+        print(f"PAUSED: {incident_id}, awaiting human approval (approve/reject via /approve)")
         print(f"Interim root cause: {result.get('root_cause') or 'under investigation'}")
         print(f"Tokens: {result.get('total_tokens_used')} (${result.get('token_cost_usd', 0):.4f})")
         print(f"{'='*60}\n")

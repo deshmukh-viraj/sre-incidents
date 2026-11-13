@@ -1,5 +1,8 @@
 """
 graph/recovery_checker.py
+
+check_recovery compares the metrics before and after an action against the
+recovery thresholds and returns a verdict.
 """
 
 import datetime
@@ -63,7 +66,7 @@ def check_recovery(
         result["verdict"] = "flap_risk"
         result["reason"] = (
             f"recovery claimed but still_breaching={still_breaching}, "
-            f"healthy_run_len={verification.healthy_run_len} (<2) — do not trust yet"
+            f"healthy_run_len={verification.healthy_run_len} (<2), do not trust yet"
         )
         return result
 

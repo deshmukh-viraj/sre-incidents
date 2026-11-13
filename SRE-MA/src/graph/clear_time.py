@@ -1,7 +1,12 @@
 """
 clear_time.py
----------------
-figures out recovery timestamps by evaluating prometheus history against thresholds.
+-------------
+finds the moment the service actually recovered. It walks back through
+the prometheus history and evaluates the alert's metrics against their
+thresholds until they first cross back under the line.
+
+That recovery timestamp is what the attribution gates use to tell
+"the agent's fix worked" apart from "the system healed on its own".
 """
 
 import json
@@ -21,7 +26,7 @@ CLEAR_SOURCE_NONE = "never_cleared"
 
 @dataclass
 class ClearEvidence:
-    """recovery evidence bucket for Gate 3 verification"""
+    """recovery evidence used by the timing check"""
     t_clear_true: Optional[float]
     clear_source: str
     healthy_run_len: int = 0
@@ -202,7 +207,8 @@ def build_clear_evidence(
 
     #in simulation prometheus has no range history; fall back to polled timestamp
     #if range query is empty, inherit the healthy_run_len verified during live polling.
-    #ceiling relies on live polling sample count. Upgrade: ensure Prometheus persistence across scenarios.
+    #this fallback relies on the live polling sample count; a persisted
+    #prometheus history would make it solid across scenarios.
     if not samples and t_clear_polled is not None:
         ev = ClearEvidence(
             t_clear_true=_to_unix(t_clear_polled),

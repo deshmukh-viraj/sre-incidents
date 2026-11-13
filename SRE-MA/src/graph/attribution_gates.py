@@ -1,10 +1,11 @@
 """
 attribution_gates.py
----------------------
-decides if the agent actually fix the issue, or if the system just healed itself.
-This file evaluates gate-3 (the temporal window) using the real recovery time
-(provided by cleae_time.py, which looks back at prometheus history)
+--------------------
+decides whether the agent fixed the issue or the system healed itself.
 
+This module checks the timing (the temporal gate): did the alert clear
+shortly after we acted? It uses the real recovery time from clear_time.py,
+which reads the prometheus history.
 """
 
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ class Gate3Result:
     reason: str
 
     def t_clear_ok(self) -> bool:
-        """quick check to see if we actu found a valid recovery tiime"""
+        """quick check that we actually found a valid recovery time"""
         return self.lead_seconds is not None
 
 
@@ -37,9 +38,9 @@ def evaluate_gate3(
     grace_sec: float = 5.0 
 ) -> Gate3Result:
     """
-    looks at the real recovery evidence and decides if our action cause it.
+    looks at the real recovery evidence and decides whether our action caused it.
     """
-    #if it never recovered out action didnt work
+    #if it never recovered, our action did not work
     if ev.t_clear_true is None:
         return Gate3Result(
             passed=False,
@@ -48,8 +49,8 @@ def evaluate_gate3(
             reason="metric never actually recovered in the window we checked"
         )
 
-    #how long after we finished actiing did it take to clear?
-    #a negative numbr means it cleared "before" we finished acting
+    #how long after we finished acting did it take to clear?
+    #a negative number means it cleared "before" we finished acting
     lead = ev.t_clear_true - t_action_end
 
     # was the system already fixing itself when we stepped in?
@@ -60,11 +61,11 @@ def evaluate_gate3(
             lead_seconds=lead,
             reason=(
                 f"metric was already dropping before agent acted "
-                f"(trend: {ev.per_action_trend_pct:.2%}). agent can not claim this one"
+                f"(trend: {ev.per_action_trend_pct:.2%}). the agent cannot claim this one"
             )
         )
 
-    # was it already green before we even started??
+    # was it already green before we even started?
     if ev.per_action_healthy:
         return Gate3Result(
             passed=False,
@@ -73,7 +74,7 @@ def evaluate_gate3(
             reason="System was already healthy when agent started acting"
         )
     
-    # dit it clear way before we fininshed?? 
+    # did it clear way before we finished?
     if lead < -grace_sec:
         return Gate3Result(
             passed=False,
@@ -90,7 +91,7 @@ def evaluate_gate3(
             lead_seconds=lead,
             reason=(
                 f"It recovered {lead: .1f}s after agent acted. "
-                f"Thats outside agent {tolerance_sec:.0f}s tolerance, so its probably not an agent"
+                f"That is outside the agent's {tolerance_sec:.0f}s tolerance, so it is probably not the agent"
             )
         )
 
@@ -113,9 +114,9 @@ def final_label(
     shadow_arm: bool = False
 ) -> str:
     """
-    mashes all 5 gates together inot final incident label.
-    if shadow_arm is true, it mean we faked the execution, so agent can never claim
-    credit for fixing it, even if all other gates pass.
+    combines all five checks into the final incident label.
+    if shadow_arm is true, the execution was faked, so the agent never gets
+    credit for fixing it, even when everything else passes.
     """
     if not gate1_claim:
         return NATURAL_CALM
@@ -123,7 +124,7 @@ def final_label(
     if not gate2_target_bound:
         return AMBIGUOUS
 
-    #if we are running the shadow test, we didnt fix it
+    #if we are running the shadow test, we did not fix it
     if shadow_arm:
         return NATURAL_CALM if gate3.t_clear_ok() else ACTION_FAILED
 

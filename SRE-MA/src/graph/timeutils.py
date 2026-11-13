@@ -1,3 +1,9 @@
+"""
+graph/timeutils.py
+
+timestamp helpers. everything comes back as a tz-aware UTC datetime.
+"""
+
 from datetime import datetime, timezone
 
 def parse_ts(ts) -> datetime:

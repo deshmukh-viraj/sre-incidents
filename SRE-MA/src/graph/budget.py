@@ -1,12 +1,13 @@
 """
 graph/budget.py
 ---------------
-global budget middleware: wraps every reasoning worker so an incident can never
-loop unbounded through LLM workers. budget limits ride in per-incident state
-(budget.max_iterations_total / max_tokens_total / spent_iterations); 0 limits =
-unlimited. once exhausted, the guarded worker is skipped (returns
-{"budget_exhausted": True} without running) and the graph degrades to
-escalation through the routers, which all check budget_exhausted.
+a global spending guard around the reasoning agents, so one incident
+can never loop through LLM workers forever.
+
+Each incident carries its own limits in state (max total iterations and
+max total tokens; 0 means unlimited). When the budget runs out the
+guarded worker is skipped and returns {"budget_exhausted": True}
+without running, and the routing logic sends the incident to escalation.
 """
 
 import os
@@ -33,7 +34,7 @@ def budget_guard(node_fn):
         if os.getenv("BUDGET_ENABLED", "0") != "1":
             return node_fn(state, *args, **kwargs) or {}
         if _exhausted(state):
-            print(f"[budget] exhausted — {getattr(node_fn, '__name__', 'worker')} skipped")
+            print(f"[budget] exhausted, {getattr(node_fn, '__name__', 'worker')} skipped")
             return {"budget_exhausted": True}
 
         out = node_fn(state, *args, **kwargs) or {}

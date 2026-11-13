@@ -1,10 +1,15 @@
 """
 graph/policy.py
---------------
+---------------
 
-policy-as-code gate between planning and execution.
-the agent proposes, this module disposes.
+the policy gate between planning and execution. The agent proposes a
+fix, this module decides whether it may run: is the tool allowed in this
+environment, is the target the alerted service or something it depends
+on, does the proposal match the evidence, and does it need human
+approval first.
 
+It also builds the idempotency keys that bind an approval to the exact
+plan that was shown.
 """
 
 import json
@@ -39,12 +44,12 @@ MIN_CITATIONS_FOR_AUTO = 2
 
 
 def _signal_class(evidence_line: str) -> str:
-    """coarse signal class a citation came from (metrics|logs|traces|flags).
-    security gap 2: policy checks grounding, not truth — one poisoned channel
-    must not carry an autonomous action, so the act-rule also needs the
-    citations to span >=2 DISTINCT classes. Ambiguous lines collapse to
-    'metrics', which can only make distinctness HARDER to reach (the safe
-    direction: ambiguity downgrades to the human gate)."""
+    """coarse class a citation came from (metrics|logs|traces|flags).
+    policy checks grounding, not truth: one poisoned channel must not carry
+    an autonomous action, so citations must also span >=2 DISTINCT classes.
+    Ambiguous lines collapse to 'metrics', which only makes the distinctness
+    check stricter (the safe direction: ambiguity downgrades to the human
+    gate)."""
     e = str(evidence_line).lower()
     if "trace" in e or "root=" in e or "dur=" in e and "ms" in e:
         return "traces"
@@ -97,7 +102,7 @@ def policy_validator_node(state) -> dict:
     max_conf = max((h.get("confidence", 0) for h in state.get("hypotheses", [])), default=0.0)
     requires_approval = state.get("requires_approval", False)
 
-    # kill switch (gap 4): read per call so ops can flip it live; every action
+    # kill switch: read per call so ops can flip it live; every action
     # becomes human-gated while set. Intake continues, nothing executes alone.
     kill = os.getenv("SRE_AUTONOMY_DISABLED") == "1"
     if kill:
@@ -105,7 +110,7 @@ def policy_validator_node(state) -> dict:
 
     # verifier verdict gate: a diagnosis the adversarial verifier could NOT uphold
     # (unverifiable/ungrounded, or contradicted after the reroute cap) never
-    # auto-executes — it goes to the human gate with the plan prepared.
+    # auto-executes, it goes to the human gate with the plan prepared.
     verifier_res = state.get("verifier_result") or {}
     verifier_blocked = bool(verifier_res) and verifier_res.get("verdict") not in (None, "upheld")
     if verifier_blocked:
@@ -135,7 +140,7 @@ def policy_validator_node(state) -> dict:
                 a = {**a, "requires_approval": True}
             elif state.get("diagnosis_mode") == "deep_agents":
                 # LLM-sourced diagnoses must cite >=2 tool results implicating the target,
-                # spanning >=2 independent signal classes (gap 2: grounding is not truth —
+                # spanning >=2 independent signal classes (grounding is not truth:
                 # a single poisoned channel must not carry an autonomous action)
                 cites = _citations_for_target(state, target)
                 if len(cites) < MIN_CITATIONS_FOR_AUTO:
@@ -151,7 +156,7 @@ def policy_validator_node(state) -> dict:
             if (a.get("tool") == "set_feature_flag"
                     and not a.get("requires_approval")):
                 # autonomous flag flips must have survived EXECUTED disproof queries
-                # (verifier grounded = live values came back). In regimes where the
+                # (verifier grounded = live values came back). In setups where the
                 # verifier is deliberately disabled, the pre-existing gates apply.
                 from src.agents.verifier_agent import verifier_enabled
                 vr = state.get("verifier_result") or {}
@@ -204,7 +209,7 @@ def route_after_critic(state) -> Literal["repair_proposal", "remediator", "deep_
     agent's own escalation request or the hard reject ceiling (escalate_reason
     set by the critic) always escalates first, and a double rejection must never
     send an empty plan to the remediator (INC-SLOBur-FF52)."""
-    # P9: budget middleware fired -> single escalation path (B7 handoff)
+    # budget ran out: single escalation path (hand off to a human)
     if state.get("budget_exhausted"):
         return "escalate"
     if state.get("escalate_reason"):

@@ -1,7 +1,8 @@
 """
-one big state object that gets passed around the langgraph nodes.
-every agent reads and writes to this.
-this is the only way they share data.
+One state object shared by every node in the graph. Each agent reads
+what it needs and returns the keys it wants to update; langgraph merges
+those writes (lists append, scalars replace). If two agents need to
+share anything, it travels through this state.
 """
 
 import os
@@ -64,7 +65,7 @@ class AttributionStatus(str, Enum):
 class Hypothesis(TypedDict):
     hypothesis:str           # plain-English root cause theory
     evidence:List[str]     # list of supporting signal snippets
-    confidence:float         # 0.0 – 1.0
+    confidence:float         # 0.0 to 1.0
     alternative:Optional[str] 
     supporting_runbook:Optional[str] 
 
@@ -142,7 +143,7 @@ class AgentState(TypedDict, total=False):
     final_p99_latency_s: Optional[float]
     error_rate: Optional[float]
 
-    #attribution (5 gate test)
+    #attribution (the five checks)
     agent_identity: str
     claim_id: str
     t_claim: Optional[str]
@@ -186,24 +187,24 @@ class AgentState(TypedDict, total=False):
     repair_attempts: Optional[int]   # one-call repair hops used before a full re-investigation
     early_paged: bool                # SEV1 paged humans mid-ladder; escalate dedupes
 
-    # ---- multi-agent roster fields (R4/R5/R10) ----
+    # multi-agent coordination fields
     # additive message ledger (merges, never overwrites; the structured layer over
     # the raw investigation_scratchpad transcript, which keeps its replace semantics)
     message_ledger: Annotated[List[Dict[str, Any]], _list_add]
     ownership: Annotated[List[str], _list_add]        # ownership transfer trail
     handoff_count: Annotated[int, _add_int]           # handoffs-to-human so far
-    budget: Annotated[Dict[str, Any], _merge_budget]  # R10: ONE global budget
+    budget: Annotated[Dict[str, Any], _merge_budget]  # one global budget
     budget_exhausted: bool
-    receipts: Annotated[List[Dict[str, Any]], _list_add]        # B6 ExecutionReceipt dicts
-    tool_invocations: Annotated[List[Dict[str, Any]], _list_add]  # R5 audit of tool calls
-    verifier_result: Optional[Dict[str, Any]]         # B1 VerificationChallenge dict
+    receipts: Annotated[List[Dict[str, Any]], _list_add]        # execution receipts
+    tool_invocations: Annotated[List[Dict[str, Any]], _list_add]  # audit of tool calls
+    verifier_result: Optional[Dict[str, Any]]         # verification challenge dict
     verifier_reroutes: Annotated[int, _add_int]       # cap-1 return-to-investigation counter
-    reattacks: Annotated[int, _add_int]               # D-02: failed-execution counter, budget 1
-    reattack_hint: Optional[str]                      # D-02: post-action evidence hint, consumed by deep_investigation
-    checker_result: Optional[Dict[str, Any]]          # B2 RecoveryChecker additional signal
-    handoff_to_human: Optional[Dict[str, Any]]        # B7 handoff package {reason, options, ...}
-    gate_version: Optional[str]                       # R5/R12: attribution gate version id
-    prompt_versions: Dict[str, str]                   # R5: worker -> prompt version
+    reattacks: Annotated[int, _add_int]               # failed-execution counter, budget 1
+    reattack_hint: Optional[str]                      # post-action evidence hint, consumed by deep_investigation
+    checker_result: Optional[Dict[str, Any]]          # extra recovery signal
+    handoff_to_human: Optional[Dict[str, Any]]        # handoff package {reason, options, ...}
+    gate_version: Optional[str]                       # attribution gate version id
+    prompt_versions: Dict[str, str]                   # worker -> prompt version
     approval_notified: bool                           # dedupes the human_gate slack page on resume
 
 
@@ -309,7 +310,7 @@ def initial_state(incident_id: str, raw_signals: Dict[str, Any]) -> AgentState:
         repair_attempts=0,
         early_paged=False,
 
-        #multi-agent roster fields (R4/R5/R10)
+        #multi-agent coordination fields
         message_ledger=[],
         ownership=[incident_id],
         handoff_count=0,

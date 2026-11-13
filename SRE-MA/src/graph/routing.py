@@ -12,8 +12,8 @@ from src.graph.state import AgentState, Severity
 
 
 #thresholds
-P99_LATENCY_CRITICAL= 3.0    # seconds — SEV1
-P99_LATENCY_WARNING = 1.5  # seconds — SEV2/3
+P99_LATENCY_CRITICAL= 3.0    # seconds, SEV1
+P99_LATENCY_WARNING = 1.5  # seconds, SEV2/3
 P99_LATENCY_RECOVERY = 0.5   
 ERROR_RATE_CRITICAL= 0.10    # 10%
 ERROR_RATE_WARNING = 0.05    # 5%
@@ -27,8 +27,6 @@ DIAGNOSIS_CONFIDENCE = 0.70    # below this -> LLM fallback
 MAX_DIAGNOSIS_LOOPS = 3       # prevent infinite re-diagnosis
 
 
-# P10 (TASK D): the fintech config pack can override the thresholds above
-# (flag CONFIG_PACK_ENABLED, default 0 — coded defaults stay active otherwise).
 def _apply_config_pack():
     try:
         from src.config.loader import config_pack
@@ -44,15 +42,14 @@ def _apply_config_pack():
 _apply_config_pack()
 
 
-#per action class temporal windows (gate 3)
+#per action class temporal windows
 # a single hardcoded grace_period=30 for every action type, as exists today, is not defensible: 
 # a feature-flag flip and a full rollback do not propagate at the same speed
 
 #time for poll + prometheus query 
 VERIFICATION_OVERHEAD_SECONDS = 25
 DELTA_EFFECT_SECONDS = {
-    # ponytail: 15s matches real propagation time for in-memory/config flag flips.
-    # Ceiling: assumes flag propagation ≤15s. Upgrade: measure per-service flag propagation p99.
+   
     "set_feature_flag": 15,
     "rollback_deployment": 120,
     "rolling_restart": 90,
@@ -64,17 +61,13 @@ DELTA_EFFECT_SECONDS = {
 # remote (AWS OTel demo) flag flips: the alert can only clear after (a) flagd
 # file-sync picks up the write, (b) load-gen traffic resumes, (c) the OTel SDK
 # exports the healthy series (60s export granularity), (d) Prometheus re-evals
-# and pushes the resolve. ponytail: 75s = 15s propagation + 60s export ceiling;
+# and pushes the resolve.75s = 15s propagation + 60s export ceiling;
 # the remaining wait is absorbed by the verification polls themselves.
 REMOTE_FLAG_EFFECT_SECONDS = 300
 REMOTE_FLAG_PROPAGATION_SECONDS = 75
-# the demo's alert uses increase(...[5m]) >= 4: after a real fix the trailing
-# 5m window takes ~2-4 min to dilute below threshold, plus the AM group wait.
-# gate-3 tolerance = this + VERIFICATION_OVERHEAD_SECONDS; 75s was measured
-# too tight on the AWS otel-demo (real fix -> AM resolve ~150-240s lead).
 
 
-#stability windows (gate 5)#stability windows determine how long we wait after an action before trusting metrics again
+##stability windows determine how long we wait after an action before trusting metrics again
 T_STABLE_SECONDS = {
     Severity.SEV1.value: 300,
     Severity.SEV2.value: 600,
@@ -123,7 +116,7 @@ def _apply_residual_check(result: dict, state: AgentState) -> dict:
     """
     novelty/ood gate: cap confidence when matched rb cannot explain every live anomaly.
 
-    uses NOVEL_DB_PRESSURE (0.50) — not DB_POOL_WARNING (0.85) — so sub-warning
+    uses NOVEL_DB_PRESSURE (0.50)  not DB_POOL_WARNING (0.85)  so sub-warning
     db pressure on a non-db runbook still counts as contradictory evidence.
     """
     if not result:
@@ -178,7 +171,7 @@ def classify_severity(state: AgentState) -> str:
     slo_budget= signals.get("slo_budget_remaining")
     decline_rate = signals.get("payment_decline_rate")
 
-    #SEV1 — full outage signals
+    #SEV1 full outage signals
     if any([
         (p99 is not None and p99 >= P99_LATENCY_CRITICAL),
         (error_rate is not None and error_rate >= ERROR_RATE_CRITICAL),
@@ -187,7 +180,7 @@ def classify_severity(state: AgentState) -> str:
     ]):
         return Severity.SEV1.value
 
-    #SEV2 — major degradation
+    #SEV2 major degradation
     if any([
         (p99 is not None and p99 >= P99_LATENCY_WARNING),
         (error_rate is not None and error_rate >= ERROR_RATE_WARNING),
@@ -197,7 +190,7 @@ def classify_severity(state: AgentState) -> str:
     ]):
         return Severity.SEV2.value
 
-    #SEV3 — partial degradation
+    #SEV3 partial degradation
     return Severity.SEV3.value
 
 
@@ -255,7 +248,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
             }, state)
         else:
             return _apply_residual_check({
-                "hypothesis": "Payment latency spike — cause ambiguous, card rails throttling unconfirmed",
+                "hypothesis": "Payment latency spike - cause ambiguous, card rails throttling unconfirmed",
                 "evidence": [
                     f"p99={p99:.3f}s elevated",
                     f"error_rate={error_rate:.3f}" if error_rate else "",
@@ -285,7 +278,7 @@ def deterministic_diagnosis(state: AgentState) -> dict:
     #RB-003: data exfiltration
     if runbook_id=="RB-003" and (bulk_export or auth_failures >= 50):
         return _apply_residual_check({
-            "hypothesis":"Possible data exfiltration — bulk export or credential stuffing",
+            "hypothesis":"Possible data exfiltration - bulk export or credential stuffing",
             "evidence":[
                 f"bulk_data_export={bulk_export}",
                 f"auth_failures={auth_failures}",
@@ -430,14 +423,14 @@ def route_after_diagnosis(
     diagnosis_mode = state.get("diagnosis_mode")
     loops = state.get("diagnosis_loops", 0)
 
-    # P9: budget middleware fired -> single escalation path (B7 handoff)
+    # budget ran out: single escalation path (hand off to a human)
     if state.get("budget_exhausted"):
         print("[router] budget exhausted -> escalate")
         return "escalate"
 
     # a passing hypothesis routes to remediation regardless of loop count:
     # failed attempts (e.g. a timed-out deep investigation) must not waste the
-    # budget needed by the successful attempt that followed (INC-SLOBur-6DFF)
+    # budget needed by the successful attempt that followed
     if hypotheses:
         max_confidence = max(h.get("confidence", 0) for h in hypotheses)
         if max_confidence >= DIAGNOSIS_CONFIDENCE:
@@ -469,8 +462,8 @@ def route_after_remediator(
     state: AgentState,
 ) -> Literal["human_gate", "execute", "escalate"]:
     """
-    P9: budget-exhausted mid-remediation -> escalate (B7 handoff).
-    human ke pass jana, otherwise execute immediately.
+    budget ran out mid-remediation: escalate, the incident hands off to a
+    human. Otherwise the plan executes right away.
     """
     if state.get("budget_exhausted"):
         return "escalate"
@@ -486,7 +479,6 @@ def route_after_verification(
     - metrics recovered -> end (success)
     - action executed but metrics still breaching and the re-attack budget is
       unspent -> one more investigation pass carrying the post-action evidence
-      (D-02: the failed action is evidence, not a verdict)
     - re-attack already spent, or the plan never executed -> escalate (human)
     """
     if state.get("verified"):
@@ -497,15 +489,15 @@ def route_after_verification(
 
 
 def route_after_investigation(state) -> Literal["critic", "llm_diagnoser", "verifier", "escalate"]:
-    """harness failure (diagnosisi_mode == 'pending_llm') degrades to legacy on shot"""
-    # P9: budget-exhausted before more LLM work -> escalate (B7 handoff)
+    """harness failure (diagnosis_mode == 'pending_llm') degrades to the legacy one-shot diagnoser"""
+    #budget-exhausted before more LLM work -> escalate
     if state.get("budget_exhausted"):
         print("[router] budget exhausted -> escalate")
         return "escalate"
     if state.get("diagnosis_mode") == "pending_llm":
         print(f"[router] deep_investigation -> llm_diagnoser (pending_llm)")
         return "llm_diagnoser"
-    # B1 Verifier (flag-gated): adversarial check between investigation and critic;
+    # adversarial check between investigation and critic;
     # fail-open default keeps the pre-change target.
     from src.agents.verifier_agent import verifier_enabled
     if verifier_enabled(state):
@@ -517,7 +509,7 @@ def route_after_investigation(state) -> Literal["critic", "llm_diagnoser", "veri
 
 def route_after_human_gate(state: AgentState) -> Literal["execute", "escalate", "end_resolved"]:
     """fix: a denied approval must NEVER reach the executor.
-    natural_calm: live signals recovered before the page — nothing to execute,
+    natural_calm: live signals recovered before the page, nothing to execute,
     close via the final communicator instead."""
     if state.get("natural_calm"):
         return "end_resolved"
@@ -543,7 +535,7 @@ def classify_blast_radius(action: dict) -> str:
             return "cluster"
         return "service"
     if "feature_flag" in tool:
-        # a flag flip is environment-wide config, not a single pod (run postmortem:
+        # a flag flip is environment-wide config, not a single pod 
         # a global flag change was labeled blast=pod)
         return "service"
     if "flush_cache" in tool:
@@ -555,8 +547,6 @@ def classify_blast_radius(action: dict) -> str:
 
 
 # action types that may run autonomously once the policy tier gate passes them
-# (goal act-rule: feature-flag flips and single-service restarts; informational
-# ops stay autonomous too — everything else starts at the human gate)
 AUTONOMOUS_ACTION_TOOLS = {
     "set_feature_flag",
     "rolling_restart",
@@ -569,7 +559,7 @@ def requires_human_approval(action: dict) -> bool:
     """
     coarse pre-gate: cluster blast or unknown reversibility always needs a human,
     and only autonomy-eligible action types may pass. service-blast actions using
-    an eligible tool are NOT blanket-gated here — the policy validator's tier gate
+    an eligible tool are NOT blanket-gated here  the policy validator's tier gate
     (service catalog) makes the final call; gating every service-level action
     would contradict the autonomy rule (stateless app restarts are auto-eligible).
     """
@@ -602,7 +592,7 @@ _DEFAULT_SERVICE_ALIASES = {
 
 
 def infer_service(alert_name: str) -> str:
-    # P10: the fintech pack's service_aliases override the coded map
+    #the fintech pack's service_aliases override the coded map
     try:
         from src.config.loader import config_pack
         mapping = (config_pack().get("service_aliases") or _DEFAULT_SERVICE_ALIASES)
