@@ -1,9 +1,13 @@
 """
 tools/prometheus_tool.py
 ------------------------
-metrics capability facade. query translation lives in the backend adapter
-(src/tools/backends/prometheus.py); this module maps capability requests
-to values and keeps the historical function signatures used across the repo.
+the front door for metric queries. The actual PromQL lives in the
+prometheus backend adapter (src/tools/backends/prometheus.py); this
+module turns a capability request (like "p99 latency for service X over
+the last 5m") into a plain value.
+
+The function names and signatures here are the ones the rest of the
+repo has always used, so callers and tests keep working.
 """
 
 import os
@@ -15,7 +19,7 @@ load_dotenv()
 
 os.environ.setdefault("SRE_ENVIRONMENT", os.getenv("SRE_ENVIRONMENT", "fintech_sim"))
 
-from src.tools.backends.registry import get_backend  # noqa: E402
+from src.tools.backends.registry import get_backend 
 
 _PROMETHEUS_URL = None  # resolved lazily from the active pack
 
@@ -36,6 +40,17 @@ def _instant_query(promql: str) -> Optional[float]:
     return backend.instant(promql)
 
 
+def _series_query(promql: str, cap: int = 8) -> Optional[list]:
+    """run a quick query and get per-series {labels, value} rows back the read
+    for label BREAKDOWN (which flag key/variant evaluates, which route errors),
+    where a single scalar is ambiguous by construction."""
+    backend = get_backend("metrics")
+    labeled = getattr(backend, "labeled_instant", None)
+    if labeled is None:
+        return None
+    return labeled(promql, cap=cap)
+
+
 def collect_incident_signals(service: str, window: str = "5m") -> Dict[str, Any]:
     """
     grabs all the important metrics for a service in one go.
@@ -51,8 +66,6 @@ def collect_incident_signals(service: str, window: str = "5m") -> Dict[str, Any]
         try:
             expr = backend.template(capability, service=service, window=window, **params)
         except KeyError:
-            # this environment's dialect has no such capability: the signal is
-            # honestly absent (None), never a zero and never a crash
             return None
         return _instant_query(expr)
 
@@ -69,7 +82,7 @@ def collect_incident_signals(service: str, window: str = "5m") -> Dict[str, Any]
         "service_memory_mb": round(val / 1_000_000, 1) if (val := q("service_memory_bytes")) else None,
     }
 
-    # P10: gateway special case + payment metric names from the config pack
+    #gateway special case + payment metric names from the config pack
     from src.config.loader import config_pack
     pack = config_pack()
     gateways = pack.get("gateway_services") or ("payment_gateway", "api_gateway")
