@@ -44,6 +44,11 @@ OTEL_DEMO_CATALOG = {
     "feature_flag_evaluation_success_total": "{service_name,feature_flag_key,feature_flag_result_variant}",
     "feature_flag_evaluation_error_total": "{service_name,feature_flag_key,feature_flag_result_error}",
     "flagd_replica_follow_refetches": "{service_name}",
+    # collector span metrics: rpc-level call counts per service even when the
+    # service itself exports no native rpc_* series (payment, checkout,
+    # currency). span_status=STATUS_CODE_ERROR is the universal error signal.
+    "traces_span_metrics_calls_total": "{service_name,span_name,span_status}",
+    "traces_span_metrics_duration_milliseconds": "{service_name,span_name} (hist)",
 }
 
 METRIC_CATALOG = {
