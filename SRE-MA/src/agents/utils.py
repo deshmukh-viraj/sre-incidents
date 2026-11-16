@@ -53,13 +53,14 @@ def _accumulate_usage(messages: list) -> tuple[int, int]:
     return total_input, total_output
 
 
-def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str = None, is_groq: bool = False, is_nvidia: bool = False):
+def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str = None, is_groq: bool = False, is_nvidia: bool = False, simple: bool = False):
+    timeout = 30 if simple else 120
     if is_groq:
         return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=0)
     elif is_nvidia:
         return ChatNVIDIA(model=model_name, temperature=temperature, api_key=api_key, base_url=base_url)
 
-    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, streaming=True )
+    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, streaming=True, timeout=timeout )
 
 
 def _get_llm(temperature: float = 0.1, simple: bool = False):
@@ -74,15 +75,15 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
 
     models = []
     if cc_key:
-        models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, is_groq=False, is_nvidia=False))
+        models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, is_groq=False, is_nvidia=False, simple=simple))
     if openrouter_key:
-        models.append(_create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False))
+        models.append(_create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False, simple=simple))
     if nvidia_key:
-        models.append(_create_llm(os.getenv("LLM_MODEL_NVIDIA"), temperature, nvidia_key, is_nvidia=True))
+        models.append(_create_llm(os.getenv("LLM_MODEL_NVIDIA"), temperature, nvidia_key, is_nvidia=True, simple=simple))
     if groq_key:
-        models.append(_create_llm(os.getenv("MODEL_GROQ"), temperature, groq_key, is_groq=True))
+        models.append(_create_llm(os.getenv("MODEL_GROQ"), temperature, groq_key, is_groq=True, simple=simple))
     if not models:
-        return _create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False)
+        return _create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False, simple=simple)
 
     primary = models[0]
     return primary

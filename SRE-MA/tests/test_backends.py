@@ -91,7 +91,7 @@ def test_default_pack_is_fintech_sim_with_no_traces():
 def test_sandbox_pack_disables_traces_until_a_search_backend_exists(monkeypatch):
     monkeypatch.setenv("SRE_ENVIRONMENT", "sandbox")
     registry.reset_cache()
-    assert registry.get_backend("metrics").url == "http://localhost:9091"
+    assert registry.get_backend("metrics").url == "http://prom-tunnel:9090"
     # verified live 2026-11-10: the demo instance runs Jaeger v2, which serves
     # no trace-search route, so the pack keeps traces disabled and honest
     assert registry.get_backend("traces") is None
