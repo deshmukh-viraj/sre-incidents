@@ -55,12 +55,13 @@ def _accumulate_usage(messages: list) -> tuple[int, int]:
 
 def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str = None, is_groq: bool = False, is_nvidia: bool = False, simple: bool = False):
     timeout = 30 if simple else 120
+    extra_body = {"thinking": {"type": "disabled"}} if simple else None
     if is_groq:
         return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=0)
     elif is_nvidia:
         return ChatNVIDIA(model=model_name, temperature=temperature, api_key=api_key, base_url=base_url)
 
-    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, streaming=True, timeout=timeout )
+    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, streaming=True, timeout=timeout, extra_body=extra_body )
 
 
 def _get_llm(temperature: float = 0.1, simple: bool = False):
