@@ -59,7 +59,7 @@ def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str
     elif is_nvidia:
         return ChatNVIDIA(model=model_name, temperature=temperature, api_key=api_key, base_url=base_url)
 
-    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url )
+    return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url, streaming=True )
 
 
 def _get_llm(temperature: float = 0.1, simple: bool = False):
