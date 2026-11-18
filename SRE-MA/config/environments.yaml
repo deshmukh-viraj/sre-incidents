@@ -62,7 +62,8 @@ sandbox:
   label_style: oteldemo
   metrics:
     adapter: prometheus
-    url: http://prom-tunnel:9090
+    # live-up.sh forwards -L 9091:localhost:9090 on the agent host
+    url: http://localhost:9091
     timeout_s: 10.0
     max_rows: 100
   logs:
