@@ -17,12 +17,9 @@ from src.tools.changepoint import detect_changepoint
 import datetime as dt
 import time
 
-# Bet 2: deterministic onset detection over the last CHANGEPOINT_WINDOW_S of the
-# two most diagnostic capabilities. Best-effort — any failure skips the hint and
-# never breaks detection.
+
 CHANGEPOINT_WINDOW_S = 1800
 CHANGEPOINT_CAPABILITIES = ("p99_latency", "error_rate")
-
 
 def _detect_changepoints(service: str) -> list:
     out = []
@@ -46,7 +43,6 @@ def _detect_changepoints(service: str) -> list:
     return out
 
 #node 1: detector
-
 def detector_node(state: AgentState) -> dict:
     """
     grab the metrics and figure out how bad it is.
@@ -57,13 +53,17 @@ def detector_node(state: AgentState) -> dict:
 
     raw = state.get("raw_signals", {})
     service = raw.get("service") or infer_service(raw.get("alert_name", ""))
-
-    # collect Prometheus metrics and Loki log patterns
-    signals = collect_all_signals(service)
-    for key, value in signals.items():
-        if key not in raw or raw[key] is None:
-            raw[key] = value
-
+    if service:
+        signals = collect_all_signals(service)
+        for key, value in signals.items():
+            if key not in raw or raw[key] is None:
+                raw[key] = value
+    else:
+        print(
+            "[detector] Service could not be identified. ",
+            "Skipping service-specific telemetry collection; DeepAgent must investigate available evidence"
+        )
+    
     # guess severity just from the numbers
     severity = classify_severity({**state, "raw_signals": raw})
 
@@ -74,13 +74,12 @@ def detector_node(state: AgentState) -> dict:
     is_shadow = bool(state.get("shadow_execution", False) or raw.get("shadow_execution", False))
     raw["shadow_execution"] = is_shadow
 
-    # Bet 2: deterministic onset hints feed the investigation as evidence anchors
-    raw["changepoints"] = _detect_changepoints(service)
+    raw["changepoints"] = _detect_changepoints(service) if service else []
 
     return {
         "raw_signals": raw,
         "severity": severity,
-        "affected_services": [service],
+        "affected_services": [service] if service else [],
         "resolution_status": ResolutionStatus.INVESTIGATING.value,
         "shadow_execution": is_shadow,
     }
