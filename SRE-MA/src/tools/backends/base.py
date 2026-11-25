@@ -37,6 +37,7 @@ class BackendConfig:
     timeout_s: float = 10.0
     max_rows: int = 100       # hard ceiling on rows/series any query may return
     enabled: bool = True
+    index_pattern: str = "otel-logs-*"
     label_style: str = "fintech"  # fintech | oteldemo: which query dialect templates use
 
 
@@ -48,6 +49,28 @@ def bounded_get(url: str, cfg: BackendConfig) -> dict:
             return json.loads(resp.read().decode())
     except Exception as e:
         raise BackendError(f"{cfg.kind} query failed ({cfg.adapter}): {e}") from e
+
+
+def bounded_post_json(url: str, payload: dict, cfg: BackendConfig) -> dict:
+    """bounded JSON POST for read-only search APIs such as OpenSearch _search.
+
+    POST is used only to submit a search request. This helper does not expose
+    write or document-mutation operations.
+    """
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=cfg.timeout_s) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise BackendError(
+            f"{cfg.kind} query failed ({cfg.adapter}): {e}"
+        ) from e
+
 
 
 def clip(rows: Sequence[Any], cfg: BackendConfig) -> List[Any]:
