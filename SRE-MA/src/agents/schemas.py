@@ -63,7 +63,7 @@ class CommunicatorOutput(BaseModel):
 
 
 # --------------------------------------------------------------------------
-# Typed roster contracts (R3). Extended here, never recreated elsewhere.
+# Typed roster contracts. Extended here, never recreated elsewhere.
 # --------------------------------------------------------------------------
 
 class IncidentContext(BaseModel):
@@ -76,7 +76,7 @@ class IncidentContext(BaseModel):
     started_at: Optional[str] = None
 
 class HypothesisReport(BaseModel):
-    """typed single-worker hypothesis emission (B4): superset of HypothesisOutput
+    """Typed single-worker hypothesis emission: superset of HypothesisOutput
     plus the fields downstream routing consumes."""
     hypothesis: str
     evidence: List[str] = Field(default_factory=list)
@@ -86,7 +86,7 @@ class HypothesisReport(BaseModel):
     diagnosis_mode: Optional[str] = None
     source: Optional[str] = None
 
-# R3 alias: ActionPlan IS ActionPlanOutput — one definition, canonical name.
+# ActionPlan is an alias for ActionPlanOutput — one definition, canonical name.
 ActionPlan = ActionPlanOutput
 
 @dataclass
@@ -101,7 +101,7 @@ class VerificationResult:
     healthy_run_len: int = 0
 
 class VerificationChallenge(BaseModel):
-    """B1 Verifier output: an adversarial check of one diagnosis claim."""
+    """Verifier output: an adversarial check of one diagnosis claim."""
     claim: str = Field(description="the diagnosis claim under test")
     disproof_queries: List[str] = Field(default_factory=list,
                                         description="read-only PromQL queries using ONLY exact metric names from the allowed list given in the prompt (empty list beats an invented one)")
@@ -110,7 +110,7 @@ class VerificationChallenge(BaseModel):
     reason: Optional[str] = None
 
 class HandoffMessage(BaseModel):
-    """one entry in the message ledger / the human handoff package (B7)."""
+    """One entry in the message ledger or the human handoff package."""
     timestamp: str
     from_worker: str
     to_worker: Optional[str] = None  # None => addressed to the human
@@ -120,7 +120,7 @@ class HandoffMessage(BaseModel):
                                description="choices offered to the human when to_worker is None")
 
 class Budget(BaseModel):
-    """R10: ONE global budget per run. Extends (not replaces) the existing
+    """One global budget per run. Extends (not replaces) the existing
     recursion/token counters; reasoning workers decrement it."""
     max_iterations_total: int = 24
     max_tokens_total: int = 400_000
@@ -140,7 +140,7 @@ class Budget(BaseModel):
         return self.iterations_exhausted or self.tokens_exhausted
 
 class ExecutionReceipt(BaseModel):
-    """B6: typed receipt for one executed (or DRY-RUN) action — the seam where
+    """Typed receipt for one executed (or DRY-RUN) action — the seam where
     the sandbox executor plugs in later."""
     action: str
     tool: str
