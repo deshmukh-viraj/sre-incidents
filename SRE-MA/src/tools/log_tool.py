@@ -1,18 +1,15 @@
 """
 tools/log_tool.py
 -----------------
-reads the AWS otel-demo logs from OpenSearch over the ssh tunnel
-(indices otel-logs-*). query_logs only reports what the index actually
-holds; it never invents entries.
+Reads AWS otel-demo logs from OpenSearch over the tunnel.
 """
 
 import os
 import re
 import json
-import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 OPENSEARCH_URL = os.getenv("LOG_OPENSEARCH_URL", "http://localhost:9200")
 INDEX_PATTERN = os.getenv("LOG_OPENSEARCH_INDEX", "otel-logs-*")
@@ -36,11 +33,10 @@ def _os_search(query: dict) -> Optional[dict]:
 
 
 def _pattern_for(body: str) -> str:
-    """collapse numbers/uuids/ips so 'x47 timeouts on 10.0.0.3' groups together"""
+    """ponytail: regex normalization collapses IPs, UUIDs, and numbers for quick clustering."""
     p = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}\b", "<ip>", body)
     p = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<uuid>", p)
-    p = re.sub(r"\d+", "<n>", p)
-    return p[:90]
+    return re.sub(r"\d+", "<n>", p)[:90]
 
 
 def query_logs(
@@ -51,8 +47,7 @@ def query_logs(
     level: Optional[str] = None,
     limit: int = ROW_LIMIT,
 ) -> Dict[str, Any]:
-    """query the otel-demo logs for one service. returns the aggregated contract
-    consumed by sre_tool.collect_all_signals and agent_tool.query_service_logs."""
+    """Queries otel-demo logs for a service and groups common patterns."""
     limit = min(limit, ROW_LIMIT)
     svc = (service or "").strip()
     if not svc:
@@ -60,7 +55,6 @@ def query_logs(
                 "records": [], "top_patterns": [], "sample_lines": [],
                 "window": {"mode": "none"}, "lines_scanned": 0, "limit": limit}
 
-    # window: explicit start/end win; else a 15-minute rolling window
     now = datetime.now(timezone.utc)
     if start:
         t0 = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
@@ -69,20 +63,18 @@ def query_logs(
     else:
         t0, t1 = now - timedelta(minutes=15), now
         mode = "rolling_15m"
-    ts_field = "observedTimestamp"
 
     must = [
         {"match_phrase": {"resource.service.name": svc}},
-        {"range": {ts_field: {"gte": t0.isoformat(), "lte": t1.isoformat()}}},
+        {"range": {"observedTimestamp": {"gte": t0.isoformat(), "lte": t1.isoformat()}}},
     ]
     if text:
         must.append({"match_phrase": {"body": text}})
     if level:
         must.append({"match_phrase": {"severityText": level}})
 
-    query = {"size": limit, "sort": [{ts_field: {"order": "desc"}}],
-             "query": {"bool": {"must": must}}}
-    data = _os_search(query)
+    data = _os_search({"size": limit, "sort": [{"observedTimestamp": {"order": "desc"}}],
+                       "query": {"bool": {"must": must}}})
     if data is None:
         return {"backend": "opensearch", "available": False,
                 "reason": f"opensearch unreachable at {OPENSEARCH_URL}",
@@ -90,24 +82,22 @@ def query_logs(
                 "window": {"mode": mode, "from": t0.isoformat(), "to": t1.isoformat()},
                 "lines_scanned": 0, "limit": limit}
 
-    hits = data.get("hits", {}).get("hits", [])
-    records = []
-    for h in hits:
-        src = h.get("_source", {})
-        records.append({
-            "timestamp": src.get(ts_field) or src.get("@timestamp"),
+    records = [
+        {
+            "timestamp": src.get("observedTimestamp") or src.get("@timestamp"),
             "level": src.get("severityText") or "",
-            "service": (src.get("resource", {}) or {}).get("service.name", svc),
+            "service": (src.get("resource") or {}).get("service.name", svc),
             "message": src.get("body", ""),
-        })
+        }
+        for src in (h.get("_source", {}) for h in data.get("hits", {}).get("hits", []))
+    ]
 
-    # top patterns: normalized message groups (most frequent first)
+    # Aggregate patterns
     groups: Dict[str, Dict[str, Any]] = {}
     for r in records:
         lvl = (r.get("level") or "?").upper()[:8]
         pat = _pattern_for(str(r.get("message", "")))
-        key = f"{lvl}|{pat}"
-        g = groups.setdefault(key, {"count": 0, "level": lvl, "pattern": pat})
+        g = groups.setdefault(f"{lvl}|{pat}", {"count": 0, "level": lvl, "pattern": pat})
         g["count"] += 1
     top_patterns = sorted(groups.values(), key=lambda g: -g["count"])[:8]
 
@@ -115,11 +105,11 @@ def query_logs(
         f"{(r.get('timestamp') or '')[11:19]} [{(r.get('level') or '?')[:5]}] {str(r.get('message', ''))[:140]}"
         for r in records[:8]
     ]
-    available = len(records) > 0
+
     return {
         "backend": "opensearch",
-        "available": available,
-        "reason": None if available else "no log lines matched in the window",
+        "available": bool(records),
+        "reason": None if records else "no log lines matched in the window",
         "records": records,
         "top_patterns": top_patterns,
         "sample_lines": sample_lines,
