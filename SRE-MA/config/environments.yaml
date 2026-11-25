@@ -57,22 +57,22 @@ sandbox:
     jaeger: monitoring
     tempo: monitoring
     opensearch: monitoring
-  # -L 9091:localhost:9090 (prometheus), -L 3200:<jaeger query port> (traces;
-  # the demo runs Jaeger, not Tempo, and its 16686 port is remapped on the host)
+  
   label_style: oteldemo
   metrics:
     adapter: prometheus
-    url: http://prom-tunnel:9090
+    url: http://localhost:9091
     timeout_s: 10.0
     max_rows: 100
   logs:
-    adapter: loki
-    url: http://localhost:3100
+    adapter: opensearch
+    url: http://localhost:9200
+    index_pattern: otel-logs-*
     timeout_s: 15.0
     max_rows: 50
   traces:
     adapter: jaeger
-    enabled: false  
-    url: http://localhost:3200
+    enabled: true 
+    url: http://localhost:16686/jaeger/ui
     timeout_s: 10.0
     max_rows: 20
