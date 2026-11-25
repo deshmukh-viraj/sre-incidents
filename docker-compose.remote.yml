@@ -7,7 +7,7 @@ services:
       -o StrictHostKeyChecking=accept-new
       -o ServerAliveInterval=30
       -o ExitOnForwardFailure=yes
-      -L 0.0.0.0:9090:localhost:9090 ubuntu@${VM_IP}"
+      -L 0.0.0.0:9091:localhost:9090 ubuntu@${VM_IP}"
     volumes:
       - ${HOME}/.ssh/aws-sandbox.pem:/key/aws-sandbox.pem:ro
 
