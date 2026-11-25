@@ -18,7 +18,7 @@ from src.tools import dispatcher
 
 
 def _preflight_enabled() -> bool:
-    """B5 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    """Pre-flight flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("REMEDIATOR_PREFLIGHT_ENABLED", "0") == "1"
 
@@ -222,7 +222,7 @@ def remediator_node(state: AgentState) -> dict:
 def _build_action_plan(runbook_id: str, state: AgentState) -> list:
     """load action plan from json."""
     raw = state.get("raw_signals", {})
-    # P10: the fintech pack can point at a different runbooks file
+    # The fintech pack can point at a different runbooks file
     from src.config.loader import config_pack
     pack_path = (config_pack().get("runbooks_path")
                  or os.path.join("runbooks", "runbooks.json"))
@@ -345,7 +345,7 @@ def _check_correlated_rb_consensus(state: AgentState) -> Optional[str]:
     return None
 
 
-#task 3.4: extraction helpers for the critic retry path
+# Extraction helpers for the critic retry path
 
 def _item_from_state_fields(state: AgentState) -> Optional[list]:
     """build the action item from the CURRENT proposed_* / llm_suggested_action
