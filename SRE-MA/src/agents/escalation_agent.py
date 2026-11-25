@@ -7,7 +7,7 @@ Responsibility:
     - build a structured escalation report (loops, tokens, best hypothesis)
     - notify the on-call team via Slack
     - mark the incident as ESCALATED in state
-    - B7: on budget/loop exhaustion, build the handoff package (reason + options)
+    - On budget/loop exhaustion, build the handoff package (reason + options)
       so the run can land in human_gate (flag HANDOFF_ENABLED, default 0)
 
 Writes to state:
@@ -48,7 +48,7 @@ def _evidence_package(state: AgentState, cap: int = 4) -> str:
 
 
 def _handoff_enabled() -> bool:
-    """B7 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    """Handoff flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("HANDOFF_ENABLED", "0") == "1"
 
@@ -65,7 +65,7 @@ def _exhaustion_cause(state: AgentState) -> str | None:
 
 
 def route_after_escalate(state: AgentState):
-    """B7: an UNPRESENTED handoff package lands in human_gate; everything else
+    """An un-presented handoff package lands in human_gate; everything else
     keeps the pre-change escalate -> communicator edge."""
     pkg = state.get("handoff_to_human") or {}
     if _handoff_enabled() and pkg and not pkg.get("presented"):
@@ -165,7 +165,7 @@ def escalate_node(state: AgentState) -> dict:
 
 
 def _handoff_package(state: AgentState, message: str, reason: str) -> dict:
-    """B7: build the handoff package ONCE (the single package builder). The
+    """Build the handoff package once (the single package builder). The
     transfer itself (ownership + count) happens in human_gate_node."""
     if not _handoff_enabled():
         return {}
