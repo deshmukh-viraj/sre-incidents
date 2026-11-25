@@ -1,7 +1,7 @@
 """
 agents/verifier_agent.py
 ------------------------
-B1 Verifier (roster upgrade): NEW adversarial node between deep_investigation
+Verifier: a new adversarial node between deep_investigation
 and critic. Flag VERIFIER_ENABLED (default 0; MULTI_AGENT=1 enables all upgrades).
 
 - read-only tools ONLY, dispatched through the Tool Librarian (dispatcher.run_tool)
@@ -18,7 +18,7 @@ and critic. Flag VERIFIER_ENABLED (default 0; MULTI_AGENT=1 enables all upgrades
   reasoning call that returns a blank reason is cost without information
 
 This node does NOT re-implement critic grounding (whitelist/target-binding
-checks live in critic_agent.py) and does NOT touch kg_tool Gate-5 logic — its
+checks live in critic_agent.py) and does NOT touch kg_tool Gate-5 logic. Its
 single job is to try to DISPROVE the diagnosis claim with live read-only data.
 """
 
@@ -64,7 +64,7 @@ VERDICT_SYSTEM_PROMPT = (
     "You are an adversarial verifier. Given the claim and the disproof query "
     "results, return a verdict: 'contradicted' if a live result refutes the "
     "claim, 'unverifiable' if results are missing/erroring, 'upheld' if the "
-    "results are consistent with the claim. Be honest — missing data is never "
+    "results are consistent with the claim. Be honest: missing data is never "
     "proof. Return ONLY the structured schema."
 )
 
@@ -93,9 +93,9 @@ def _evidence_of(state: AgentState) -> str:
 
 
 def _invoke_structured(llm, schema, messages):
-    """structured output via langchain with_structured_output; returns (parsed, raw)."""
-    result = llm.with_structured_output(schema, include_raw=True).invoke(messages)
-    return result["parsed"], result["raw"]
+    """structured output via the provider-tolerant helper; returns (parsed, raw)."""
+    sr = structured_invoke(schema, messages, llm=llm)
+    return sr["parsed"], sr["raw"]
 
 
 @observe(name="verifier")
@@ -129,14 +129,15 @@ def verifier_node(state: AgentState) -> dict:
                  catalog=", ".join(sorted(catalog_for_active_environment())),
                  labels=guidance)),
              HumanMessage(content=f"CLAIM: {claim}\n\nEVIDENCE SO FAR:\n{evidence or 'none'}")])
-        usage = raw.usage_metadata or raw.response_metadata.get("token_usage", {})
+        usage = ((getattr(raw, "usage_metadata", None)
+                  or (getattr(raw, "response_metadata", {}) or {}).get("token_usage", {})) if raw else {})
         spent_in += usage.get("input_tokens", 0)
         spent_out += usage.get("output_tokens", 0)
 
         results, executed, values_ok = [], 0, []
         for expr in (challenge.disproof_queries or [])[:VERIFIER_MAX_DISPROOF_QUERIES]:
             # static pre-check: reject broken PromQL before the round trip; the
-            # catalog check stays off here — unknown metrics are honest no-data
+            # catalog check stays off here because unknown metrics are honest no-data
             # results, and the read-only dispatcher is the enforcement point
             valid, why = validate_expr(expr, check_catalog=False)
             if not valid:
@@ -168,7 +169,8 @@ def verifier_node(state: AgentState) -> dict:
                 [SystemMessage(content=VERDICT_SYSTEM_PROMPT),
                  HumanMessage(content=f"CLAIM: {claim}\n\nDISPROOF RESULTS:\n" +
                               "\n".join(results))])
-            usage = raw.usage_metadata or raw.response_metadata.get("token_usage", {})
+            usage = ((getattr(raw, "usage_metadata", None)
+                  or (getattr(raw, "response_metadata", {}) or {}).get("token_usage", {})) if raw else {})
             spent_in += usage.get("input_tokens", 0)
             spent_out += usage.get("output_tokens", 0)
             challenge = verdict_challenge
