@@ -1,12 +1,9 @@
 """
 agents/deep_investigation.py
---------------------------------
-
-DeepAgent/react harness adapter for novel incidents investigation
-Owns the thinking -> tool -> observe loop, we own governance
-
-added - tool call caching to prevent duplicate queries
-      - stagnation breaker to force conclusion after 2 max rounds
+----------------------------
+handles deep investigations for novel incidents that don't match known runbooks.
+manages the agent loop, runs diagnostic tools, avoids duplicate queries, and ensures
+the investigation either reaches a proposed fix or escalates to a human engineer.
 """
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -15,7 +12,7 @@ from langgraph.prebuilt import create_react_agent
 import re
 from src.agents.utils import _get_llm, calculate_cost, _accumulate_usage
 from src.tools.agent_tool import (
-    ALL_TOOLS, READ_TOOLS, propose_remediation, escalate_with_reason,
+    ALL_TOOLS, READ_TOOLS, INVESTIGATION_TOOLS, propose_remediation, escalate_with_reason,
     reset_investigation_cache,
 )
 from src.tools.kg_tool import SERVICE_METRICS, get_dependencies
@@ -25,14 +22,14 @@ from src.graph.routing import (
     classify_blast_radius,
 )
 
-#iteration budget: configurable per alert class
-MAX_ROUNDS_RUNBOOK_HIT = 4   #known runbook match
-MAX_ROUNDS_RUNBOOK_MISS = 8  #novel / no runbook match
+# maximum tool investigation rounds allowed
+MAX_ROUNDS_RUNBOOK_HIT = 4   # runbook found
+MAX_ROUNDS_RUNBOOK_MISS = 8  # no runbook found
 STAGNATION_THRESHOLD = 2
 
 
 def get_max_rounds(state) -> int:
-    """determine max rounds based on whether a runbook matches."""
+    """determines how many query rounds the agent gets based on runbook availability."""
     runbook_id = state.get("runbook_id")
     if runbook_id and runbook_id.startswith("RB-"):
         return MAX_ROUNDS_RUNBOOK_HIT
@@ -40,38 +37,84 @@ def get_max_rounds(state) -> int:
 
 
 INVESTIGATOR_PROMPT = (
-    "YOU ARE AN EXPERT SRE INVESTIGATING AN INCIDENT WITH NO KNOWN RUNBOOK MATCH "
-    "EACH TOOL CALL MUST TEST ONE HYPOTHESIS; NEVER INVENT METRICS VALUES "
-    "RULE 1: start with query_topology(primary service) for dependencies, past incidents "
-    "and exact PromQL. The PromQL returned by query_topology is authoritative — use it directly. "
-    "Only call list_metrics(service) as a FALLBACK if a query returns empty or errors. "
-    "You have a budget of {max_rounds} tool rounds. "
-    "Remaining budget will be reported each round. "
-    "TERMINATION: you MUST end by EITHER calling propose_remediation "
-    "OR your final message being exactly 'escalate'. Never end with only a summary. "
-    "IF YOU SEE A MESSAGE SAYING YOU ALREADY QUERIED SOMETHING, MOVE TO A DIFFERENT HYPOTHESIS IMMEDIATELY\n"
-    "PARALLEL EXECUTION: When multiple independent queries can be made in the same round, "
-    "batch them into a single tool call batch. For example, p99 latency, error rate, "
-    "and DB pool queries are independent and should be issued together.\n"
-    "PROMQL VALIDATION: Before executing any query_prometheus_metric, ensure the PromQL has "
-    "balanced brackets and that rate()/increase() functions include a range selector (e.g., [5m]). "
-    "Malformed queries will be rejected with a structured error.\n"
-    "NO DATA IS NOT PROOF OF ABSENCE: an empty or erroring query means that signal is "
-    "unavailable, not that the fault is absent. Record which query returned nothing; "
-    "never base an escalation purely on missing data — escalate on the evidence you have.\n"
-    "FLAG PATH: if the alert or signals touch feature flags, get the per-flag/per-variant "
-    "breakdown FIRST via query_prometheus_series (e.g. sum by (feature_flag_key, "
-    "feature_flag_result_variant) (increase(feature_flag_evaluation_success_total"
-    "{{service_name=\"<svc>\"}}[10m]))) — a big increase on a non-default variant IS the "
-    "fault, not a healthy eval stream. Pin the culprit with explicit matchers "
-    "(feature_flag_key=..., feature_flag_result_variant=...) and propose set_feature_flag "
-    "back to the healthy variant. Never conclude the flag path is healthy from an "
-    "aggregate success rate alone.\n"
-    "LOG HANDLING: If logs_ok is false, state that logs are unavailable rather than calling query_service_logs. "
-    "If logs_ok is true and the alert is novel, query_service_logs is a recommended first-round call."
+    "You are an SRE investigating an incident with no matching runbook.\n"
+    "Your job is to check live data, find the root cause, and either propose a fix or escalate with clear evidence.\n\n"
+
+    "1. Discovering metrics and topology:\n"
+    "- Before writing PromQL for the primary service, call discover_prometheus_telemetry(primary_service).\n"
+    "- Use the returned metric and label names as your starting point. Do not guess or assume HTTP, RPC, or DB metrics exist.\n"
+    "- If you get 'service_label_unmatched', look at the observed label names and values, find the right service label, and retry discovery with service_label and service_value.\n"
+    "- If you get 'service_matched_no_metrics', do not assume the service is healthy. Check other telemetry sources and upstream/downstream services.\n"
+    "- query_topology helps show service dependencies and past incidents, though it is not a live list of Prometheus metrics.\n\n"
+
+    "2. Profiling metrics:\n"
+    "- Before building PromQL for an unfamiliar service, call profile_prometheus_telemetry(service).\n"
+    "- Use its discovery section for real metric names and labels, and its profile section for likely metric roles.\n"
+    "- Treat these roles as hints, not proof of health or root cause. Prefer metrics with metadata and live series, and do not guess unknown roles.\n"
+    "- Use list_metrics or discover_prometheus_telemetry if you need more discovery or explicit label matching.\n\n"
+
+    "3. Testing hypotheses and running queries:\n"
+    "- Every tool call should test a specific idea. Never make up metric values.\n"
+    "- Batch independent queries in the same round (for example, p99 latency, error rate, and DB pool checks).\n"
+    "- Keep PromQL valid: balance brackets and include a range selector like [5m] inside rate() or increase().\n"
+    "- Do not repeat a query the cache already returned; move on to a different check right away.\n\n"
+
+    "4. Planned PromQL queries:\n"
+    "- Use profile_prometheus_telemetry to inspect candidate metric roles, then use execute_prometheus_plan to test a hypothesis against live data.\n"
+    "- Only use metrics and labels seen in discovery, with an operation that fits the metric type.\n"
+    "- Do not invent metric names, labels, or values, and prefer execute_prometheus_plan over hand-written PromQL.\n\n"
+
+    "How to read query results:\n"
+    "- DATA: samples came back; inspect their values and labels.\n"
+    "- EMPTY: the query ran but matched no samples.\n"
+    "- QUERY_ERROR: Prometheus rejected the query.\n"
+    "- BACKEND_UNAVAILABLE: telemetry could not be reached.\n"
+    "- PLAN_REJECTED: the query plan failed validation.\n"
+    "Never treat EMPTY or an error as proof that the service is healthy; try another angle when evidence is thin.\n\n"
+
+    "5. Feature flags and logs:\n"
+    "- Feature flags: if the alert or signals involve feature flags, get the per-flag and per-variant breakdown first via query_prometheus_series:\n"
+    "  sum by (feature_flag_key, feature_flag_result_variant) (increase(feature_flag_evaluation_success_total{{service_name=\"<svc>\"}}[10m]))\n"
+    "  A spike on a non-default variant is the fault, not healthy traffic. Pin it with explicit matchers (feature_flag_key=..., feature_flag_result_variant=...) and propose set_feature_flag back to the healthy variant. Do not judge flags from aggregate success rates alone.\n"
+    "- Logs (logs_ok is {logs_ok}):\n"
+    "  If logs_ok is False, do not call query_service_logs; note that logs are unavailable.\n"
+    "  If logs_ok is True, call query_service_logs early to catch error signatures.\n\n"
+
+    "6. Missing data and escalation:\n"
+    "- Missing data is not proof of health: an empty query or unreachable backend only means that signal is unavailable.\n"
+    "- When a query returns empty or fails, check whether it is a missing signal or a label/window mismatch, and check related dependencies.\n"
+    "- Never escalate just because data is missing; escalate based on the concrete evidence you found.\n\n"
+
+    "Investigation flow:\n"
+    "1. Understand the alert and affected service.\n"
+    "2. Discover available telemetry instead of assuming metric names.\n"
+    "3. Profile relevant metrics to see candidate signals.\n"
+    "4. Form a specific, testable hypothesis and run a validated query.\n"
+    "5. Check the returned values, labels, and timestamps.\n"
+    "6. If evidence is thin, test another hypothesis on a different signal.\n"
+    "7. Cross-check metrics with logs, traces, and recent changes when available.\n"
+    "8. Pin down the most likely root cause with supporting and contradicting evidence.\n"
+    "9. If you still cannot confirm a root cause, escalate instead of guessing a fix.\n\n"
+
+    "INVESTIGATION RULES:\n"
+    "- Never repeat an identical query without a reason.\n"
+    "- Never interpret an empty result as proof of normal health.\n"
+    "- Never confuse correlation with causation.\n"
+    "- A metric name alone does not establish its meaning.\n"
+    "- Do not propose remediation until the root cause has sufficient "
+    "supporting evidence.\n"
+    "- Respect all existing critic, verifier, attribution and policy gates.\n\n"
+
+
+    "## 6. BUDGET & TERMINATION RULES\n"
+    "- Budget: You have a total budget of {max_rounds} tool rounds. Remaining rounds are reported each round.\n"
+    "- Termination: You MUST conclude your investigation by either:\n"
+    "  1. Calling propose_remediation with a fully evidence-backed action plan, OR\n"
+    "  2. Calling escalate_with_reason (or responding with 'escalate') detailing what was checked, what was ruled out, and why human intervention is required.\n"
+    "- Never end your investigation with only a conversational summary."
 )
 
-# breach checks reused by the calm-first policy below
+#key signals to check against warning thresholds
 _BREACH_CHECKS = [
     ("circuit_breaker_state", CIRCUIT_BREAKER_OPEN),
     ("db_pool_utilization", DB_POOL_WARNING),
@@ -81,14 +124,14 @@ _BREACH_CHECKS = [
     ("payment_decline_rate", DECLINE_RATE_HIGH),
 ]
 
+
 def _breaches(state) -> list:
-    """live signals breaching warning thresholds (missing signal = not breaching)"""
+    """finds any active metrics that exceed warning thresholds."""
     s = state.get("raw_signals", {})
     out = []
     for key, thr in _BREACH_CHECKS:
         v = s.get(key)
         if v is not None and v >= thr:
-            # name the source of the threshold: the alert's own annotation may cite a
             out.append(f"{key}={v:.3f} above internal warning threshold {thr}")
     lp = s.get("log_patterns", {}) or {}
     if (lp.get("auth_failures") or 0) >= 50:
@@ -99,41 +142,33 @@ def _breaches(state) -> list:
 
 _harness = None
 
+
 def get_harness():
-    """create the react agent harness.
-    binds read tools AND the two terminal tools: the model cannot conclude with
-    propose_remediation/escalate_with_reason unless they are bound (the unbound
-    harness made conclusions reachable only through the forced-finalizer).
-    """
+    """initializes the react agent with both investigation and conclusion tools."""
     global _harness
     if _harness is None:
         llm = _get_llm(temperature=0.2)
         llm = llm.bind_tools(ALL_TOOLS, parallel_tool_calls=True)
         _harness = create_react_agent(
             model=llm,
-            tools=ALL_TOOLS,
+            tools=INVESTIGATION_TOOLS,
         )
     return _harness
 
-
 def _cache_key(tool_name: str, args: dict) -> str:
-    """generate a cache key for tool calls"""
+    """creates a unique cache key for a tool call and its arguments."""
     return f"{tool_name}: {hash(frozenset(args.items()))}"
 
 
 def _terminal_call_ids(msgs) -> set:
-    """tool_call ids of the terminal tools, so their receipts can be kept out of
-    the scratchpad (they would otherwise count as 'tool results' in the critic's
-    grounding check without proving anything)."""
+    """returns ids of exit tools (propose/escalate) so they aren't confused with diagnostic evidence."""
     return {tc.get("id") for m in msgs
             for tc in (getattr(m, "tool_calls", None) or [])
             if (tc.get("name") or "") in ("propose_remediation", "escalate_with_reason")}
 
 
 def _tool_evidence(msgs, cap: int = 6) -> list:
-    """pair tool results with the query that produced them, most recent last.
-    terminal receipts (propose_remediation/escalate_with_reason responses) are
-    not evidence — 'proposal recorded, investigation ended.' proved nothing."""
+    """pairs each tool query with its output to build clear evidence for the diagnosis."""
     terminal = {"propose_remediation", "escalate_with_reason"}
     queries, out = {}, []
     for m in msgs:
@@ -144,8 +179,7 @@ def _tool_evidence(msgs, cap: int = 6) -> list:
             name, expr = queries[m.tool_call_id]
             if name in terminal:
                 continue
-            # cite the metric + labels, not the wrapping function: 'sum -> 0.012'
-            # told the critic nothing; metric{labels} is what it must verify
+            #extract metric and labels (e.g. http_requests_total{service="..."}) for readability
             ref = re.search(r"[a-zA-Z_][a-zA-Z0-9_]*(?=\{)", expr)
             if ref:
                 end = expr.find("}", ref.end())
@@ -157,17 +191,10 @@ def _tool_evidence(msgs, cap: int = 6) -> list:
 
 
 def _structured_writeback(state, base_return, proposal, terminal, text_escalated, msgs) -> dict:
-    """the agent concluded by calling escalate_with_reason with a
-    fully-evidenced finding, but only the free text survived; hypotheses/root_cause/
-    evidence_summary stayed null so the critic saw hypotheses:[] and the escalator
-    reported 'Finding: no diagnosis reached'. Write the finding, the live tool
-    observations and the signal bullets into state on every terminal path.
-    """
+    """formats the agent's findings, observed metrics, and proposed fix back into incident state."""
     finding, conf, agent_escalated = None, 0.0, False
     if proposal:
-        finding, conf = str(proposal.get("action") or ""), 0.65
-        #0.65 < DIAGNOSIS_CONFIDENCE: proposals still pass critic + policy, findings
-        #alone must not auto remediate
+        finding, conf = str(proposal.get("action") or ""), 0.65  #requires critic review before executing
     elif text_escalated:
         finding = str((terminal["args"] or {}).get("reason", "") or "")
         conf, agent_escalated = 0.60, True
@@ -180,8 +207,7 @@ def _structured_writeback(state, base_return, proposal, terminal, text_escalated
         f"{key}={s.get(key)} within internal threshold {thr}"
         for key, thr in _BREACH_CHECKS if s.get(key) is not None
     ][:4]
-    # finding lives in root_cause/diagnosis_summary/hypothesis already;
-    # evidence carries only observations (P1 dedupe) — a claim is not its own evidence
+    #collect real observations from threshold breaches and tool queries
     ev_core = breaches + _tool_evidence(msgs)
     evidence = ev_core
 
@@ -203,24 +229,13 @@ def _structured_writeback(state, base_return, proposal, terminal, text_escalated
 
 
 def deep_investigation_node(state) -> dict:
-    """
-    deep investigation node for novel/low-confidence incidents.
-    replaces llm_diagnoser on the pending_llm path
-    returns structured proposal for critic/policy validation
-    Intercepts duplicate tool calls and serves caches results and
-    forces conclusion after STAGNATION_THRESHOLD stagnat rounds
-    """
+    """runs a multi-round diagnostic investigation for unfamiliar alerts and generates a verified resolution."""
     print(f"\n[deep_investigation] Starting investigation for {state.get('incident_id')}")
     print(f"[deep_investigation] Alert: {state.get('alert_name')} | Severity: {state.get('severity')}")
     print(f"[deep_investigation] Services: {state.get('affected_services')}")
 
-    # a verifier reroute continues the SAME investigation: keep the per-run read
-    # cache so pass 2 sees recorded results + duplicate-suppression instead of
-    # re-running identical queries (measured: ~75s + half the run cost, zero new
-    # evidence). fresh incidents and critic re-investigations reset it.
+    # reset tool query cache for fresh incidents or post-fix re-evaluations; keep cache on verifier reroutes
     if not state.get("verifier_reroutes") or state.get("reattack_hint"):
-        #a re-attack MUST see fresh post-action values: cache-served duplicates
-        #would replay pre-action readings and poison the second pass
         reset_investigation_cache()
     tool_call_cache = {}
 
@@ -235,9 +250,7 @@ def deep_investigation_node(state) -> dict:
 
     affected_services = state.get('affected_services') or ['unknown']
     primary_service = affected_services[0]
-    #hypothesis seeds: candidates come from the KG dependency frontier of the
-    #primary service (works offline via the static topology fallback); error
-    #logs pick WHICH frontier nodes to probe first
+    #find downstream dependencies mentioned in error logs to check alongside the primary service
     frontier = get_dependencies(primary_service, hops=2)
     downstream_services = {dep for log in error_logs for dep in frontier if dep in log.lower()}
     all_services = [primary_service] + list(downstream_services)
@@ -252,24 +265,22 @@ def deep_investigation_node(state) -> dict:
     seeds = "\n".join(SERVICE_METRICS.get(primary_service, [])[:6])
     seed_text = f"\nSEED METRICS (run these first):\n{seeds}" if seeds else ""
 
-    #determine round budget and inject into prompt
+    # determine maximum tool rounds for this investigation
     max_rounds = get_max_rounds(state)
     logs_ok = raw.get("logs_ok", False)
     
-    #format the prompt with runtime values
+    #format investigator prompt with budget and available signals
     formatted_prompt = INVESTIGATOR_PROMPT.format(
         max_rounds=max_rounds,
         logs_ok=logs_ok
     )
 
-    #on a critic retry, the critique tells the investigator what was wrong with the last proposal
+    #if the critic rejected a previous proposal, pass the critique so the agent fixes it
     critique_hint = ""
     if state.get("requires_retry") and state.get("critique"):
         critique_hint = f"\nCRITIC REJECTION (fix this): {state['critique']}\n"
 
-    #on a verifier reroute, the challenge tells the investigator what did not survive
-    #adversarial checking — the reroute must add NEW evidence, not repeat the queries
-    #the verifier already ran (they are cached and will answer as duplicates)
+    #if the verifier challenged the previous diagnosis, prompt for new evidence
     verifier_hint = ""
     vr = state.get("verifier_result") or {}
     if state.get("verifier_reroutes") and vr.get("verdict") != "upheld":
@@ -277,18 +288,16 @@ def deep_investigation_node(state) -> dict:
             f"\nVERIFIER CHALLENGE: your diagnosis did not survive adversarial checking "
             f"(verdict={vr.get('verdict')}, reason={vr.get('reason')}). Disproof queries "
             f"already run: {vr.get('disproof_queries') or 'none executed'}. Re-ground the "
-            f"diagnosis with DIFFERENT evidence — do not repeat those queries.\n"
+            f"diagnosis with DIFFERENT evidence; do not repeat those queries.\n"
         )
 
-    # D-02: the executor's action ran but verification failed; the observed
-    # post-action state is the new evidence for this pass
+    #if a previous fix didn't resolve the alert, pass post-action readings for the retry
     reattack_hint = ""
     if state.get("reattack_hint"):
         reattack_hint = f"\nPOST-ACTION RETRY: {state['reattack_hint']}\n"
 
-    # D-02/Bet 2: deterministic onset times are evidence anchors — a root-cause
-    # narrative the agent produces must align with when the metrics actually broke
-    cps = raw.get("changepoints") or []
+    # include detected metric jump/drop times so the agent's timeline stays accurate
+    cs = raw.get("changepoints") or []
     change_hint = ""
     if cps:
         lines = "\n".join(
@@ -297,12 +306,11 @@ def deep_investigation_node(state) -> dict:
             for c in cps
         )
         change_hint = (
-            "\nCHANGE-POINT EVIDENCE (deterministic onset detection — your root-cause "
+            "\nCHANGE-POINT EVIDENCE (deterministic onset detection; your root-cause "
             f"story must be consistent with these times):\n{lines}\n"
         )
 
-    # Bet 5/D-06: approved learning memory, injected as LOW-TRUST data
-    # (a hint, never an instruction; content was human-approved at write time)
+    # include similar past incidents as reference hints (must be verified against live data)
     mem_hint = ""
     try:
         from src.learning.distill import retrieve_similar
@@ -327,7 +335,6 @@ def deep_investigation_node(state) -> dict:
     try:
         result = get_harness().invoke(
             {"messages": [SystemMessage(content=formatted_prompt), HumanMessage(content=ctx)]},
-            # run_name names the trace observation (else every model call reads ChatOpenAI)
             config={"recursion_limit": 2 * max_rounds + 2, "run_name": "deep-investigation"}
         )
     except Exception as e:
@@ -340,8 +347,7 @@ def deep_investigation_node(state) -> dict:
 
     msgs = result["messages"]
 
-    # duplicate-call accounting — hoisted before the forced finalizer so the
-    # stagnation signal can gate what happens when the agent never concludes
+    #track unique vs. duplicate tool queries to detect loops
     tool_call_in_response = [tc for m in msgs for tc in (getattr(m, "tool_calls", None) or [])]
     fresh_calls = []
     for tc in tool_call_in_response:
@@ -356,12 +362,12 @@ def deep_investigation_node(state) -> dict:
     if stagnant:
         print(f"[deep_investigation] STAGNATION: all {len(tool_call_in_response)} tool calls were duplicates")
 
-    #forced finalization, one retry with an explicit "output now" nudge before giving up
+    #if the agent didn't call propose or escalate, prompt it once more to conclude
     terminal = next((tc for m in msgs for tc in (getattr(m, "tool_calls", None) or []) if tc['name'] in ("propose_remediation", "escalate_with_reason")), None)
     if terminal is None:
         try:
             fin_llm = _get_llm(temperature=0.0).bind_tools([propose_remediation, escalate_with_reason], tool_choice="required")
-            #use full system prompt with round budget for forced finalization
+            # final nudge prompting for an immediate conclusion
             fin_ctx = (
                 f"ROUNDS REMAINING: 0 (limit reached)\n"
                 f"Investigation limit reached. You MUST call propose_remediation or escalate_with_reason now.\n"
@@ -382,15 +388,14 @@ def deep_investigation_node(state) -> dict:
         fixes = re.findall(r'-\s*(.*?)\s*\(success_rate=(\d+)%', top_text)
         keywords = [w for w in re.findall(r'\w+', f"{state.get('alert_name', '')} {' '.join(_breaches(state))}".lower()) if len(w) > 3]
         relevant = [(fix, int(rate)/100.0) for fix, rate in fixes if any(k in fix.lower() for k in keywords)]
-        # acting on a canned fix needs fresh evidence: fewer distinct queries than
-        # STAGNATION_THRESHOLD means the loop went in circles — escalate instead
+        #check if known fixes match observed symptoms; otherwise escalate
         if relevant and len(fresh_calls) >= STAGNATION_THRESHOLD:
             best_fix, rate = max(relevant, key=lambda x: x[1])
             tool = "rollback_deployment" if "rollback" in best_fix.lower() else ("set_feature_flag" if "flag" in best_fix.lower() else "rolling_restart")
             blast = classify_blast_radius({"tool": tool, "params": {"service": primary_service}})
             terminal = {"name": "propose_remediation", "args": {"action": best_fix, "tool": tool, "target_service": primary_service, "blast_radius": blast, "confidence": 0.70 if rate >= 0.90 else 0.55}}
         else:
-            #never escalate empty-handed,carry the best diagnosis into the reason
+            #escalate with the clearest available finding rather than an empty reason
             hyps = state.get("hypotheses") or []
             finding = (state.get("root_cause") or (hyps[0].get("hypothesis") if hyps else "") or "no diagnosis reached")
             terminal = {"name": "escalate_with_reason", "args": {"reason": f"no_relevant_known_fix; finding: {finding}"}}
@@ -400,13 +405,12 @@ def deep_investigation_node(state) -> dict:
     if text_escalated:
         print(f"[deep_investigation] Agent concluded: escalate ({terminal['args'].get('reason')})")
 
-    #cost accounting
+    #calculate token usage and estimated cost
     model_name = next((getattr(m, "response_metadata", {}).get("model_name") or getattr(m, "response_metadata", {}).get("model") for m in reversed(msgs) if getattr(m, "response_metadata", None)), None)
     input_tokens, output_tokens = _accumulate_usage(msgs)
     cost = calculate_cost(input_tokens, output_tokens, model_name)
 
-    base_return = {
-        # consumed: a stale re-attack hint must not re-inject into later passes
+    base_return = {        # clear one-time retry hints so they don't leak into subsequent runs
         "reattack_hint": None,
         "investigation_scratchpad": [
             f"{m.type}: {str(m.content)[:200]}" for m in msgs
@@ -420,15 +424,11 @@ def deep_investigation_node(state) -> dict:
         "model_used": model_name or state.get("model_used") or "deep-agent-harness",
     }
 
-
-    # calm-first policy: novel incidents must not page humans by default.
-    # - no live breach at all -> close as false positive (notify info, no human)
-    # - breach found but no proposal + SEV2/SEV3 -> safe mitigation first; escalate
-    #   only if verification then fails (execute -> escalate_execution)
-    # - SEV1 with no proposal falls through to critic SEV1 fallback -> human (exceptional)
-    # ponytail: false-positive closes get honest labels from the existing 5-gate
-    # attribution (metrics already healthy -> lead<0 -> natural_calm); upgrade path
-    # is an explicit alertmanager silence instead of in-memory close.
+    # policy for unresolved novel alerts:
+    # - if all metrics are healthy, close as a false positive (no human paged).
+    # - if metrics show an anomaly but no fix was found, run safe diagnostics first for sev2/sev3
+    # - for sev1, escalate directly to the on-call engineer.
+    # false-positive closes are handled in-memory; upgrade path is an explicit alertmanager silence
     if proposal is None and not text_escalated:
         service = primary_service
         found = _breaches(state)
@@ -439,18 +439,18 @@ def deep_investigation_node(state) -> dict:
                 for key, thr in _BREACH_CHECKS
                 if state.get("raw_signals", {}).get(key) is not None
             ][:4]
-            print(f"[deep_investigation] ALL CLEAR: no live breach — calming alert (false-positive close, no human paged)")
+            print(f"[deep_investigation] ALL CLEAR: no live breach, calming alert (false-positive close, no human paged)")
             return {**base_return,
                 "investigation_complete": True,
                 "hypotheses": [{
-                    "hypothesis": f"No active anomaly on {service} — all signals within thresholds; {state.get('alert_name')} is likely transient or a false positive",
+                    "hypothesis": f"No active anomaly on {service}; all signals within thresholds, so {state.get('alert_name')} is likely transient or a false positive",
                     "evidence": healthy_ev or ["no breaching signal found during live investigation"],
                     "confidence": 0.85,
                     "alternative": "slow-burn issue below thresholds",
                     "supporting_runbook": None,
                 }],
                 "action_plan": [{
-                    "action": f"Alert calmed: {state.get('alert_name')} investigated, no real anomaly — closed as false positive",
+                    "action": f"Alert calmed: {state.get('alert_name')} investigated, no real anomaly, closed as false positive",
                     "tool": "notify",
                     "params": {"channel": "incidents", "severity": "info", "message": f"{state.get('alert_name')} on {service}: investigation found no breach; no human action needed"},
                     "blast_radius": "pod",
@@ -462,18 +462,18 @@ def deep_investigation_node(state) -> dict:
             }
 
         if state.get("severity") in ("SEV2", "SEV3"):
-            print(f"[deep_investigation] Anomaly confirmed, no proposal — safe mitigation before escalation: {found[0]}")
+            print(f"[deep_investigation] Anomaly confirmed, no proposal; running safe mitigation before escalation: {found[0]}")
             return {**base_return,
                 "investigation_complete": True,
                 "hypotheses": [{
-                    "hypothesis": f"Investigation confirmed anomaly on {service}: {found[0]}; root cause not identified — capturing diagnostics and monitoring",
+                    "hypothesis": f"Investigation confirmed anomaly on {service}: {found[0]}; root cause not identified, capturing diagnostics and monitoring",
                     "evidence": found,
                     "confidence": 0.60,
                     "alternative": "transient spike that will self-recover",
                     "supporting_runbook": None,
                 }],
                 "action_plan": [{
-                    "action": f"Capture diagnostics on {service} and monitor — safe mitigation to calm {state.get('alert_name')}",
+                    "action": f"Capture diagnostics on {service} and monitor (safe mitigation to calm {state.get('alert_name')})",
                     "tool": "capture_diagnostics",
                     "params": {"service": service},
                     "blast_radius": "pod",
@@ -493,4 +493,3 @@ def deep_investigation_node(state) -> dict:
         print(f"[deep_investigation] Writeback: finding={str(out.get('root_cause'))[:80]!r} "
               f"evidence={len(out['hypotheses'][0]['evidence'])} entries, agent_escalated={out.get('escalate_reason')}")
     return out
-
