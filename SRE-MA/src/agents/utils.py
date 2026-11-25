@@ -58,7 +58,6 @@ def _create_llm(model_name: str, temperature: float, api_key: str, base_url: str
         return ChatGroq(model=model_name, temperature=temperature, api_key=api_key, max_retries=0)
     elif is_nvidia:
         return ChatNVIDIA(model=model_name, temperature=temperature, api_key=api_key, base_url=base_url)
-
     return ChatOpenAI(model=model_name, temperature=temperature, max_retries=0, api_key=api_key, base_url=base_url )
 
 
@@ -73,8 +72,8 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
     primary_model_cc = os.getenv("LLM_MODEL_CC", "deepseek-v4-flash-0731")
 
     models = []
-    if cc_key:
-        models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, is_groq=False, is_nvidia=False))
+    # if cc_key:
+    #     models.append(_create_llm(primary_model_cc, temperature, cc_key, base_url, is_groq=False, is_nvidia=True))
     if openrouter_key:
         models.append(_create_llm(primary_model, temperature, openrouter_key, openrouter_base, is_groq=False))
     if nvidia_key:
@@ -91,18 +90,21 @@ def _get_llm(temperature: float = 0.1, simple: bool = False):
 def structured_invoke(schema, messages, temperature: float = 0.1, simple: bool = False,
                       llm=None) -> dict:
     """provider-tolerant structured output: returns {"parsed", "raw", "usage"}.
-    llm=None builds one via _get_llm. ChatNVIDIA's with_structured_output does
-    not support include_raw=True — on NVIDIA the parsed model comes back
-    directly and token usage is reported as unavailable (0/0) rather than
-    crashing the worker."""
+    some providers (langchain_nvidia_ai_endpoints) reject include_raw=True, so
+    retry parsed-only and report empty usage."""
     llm = llm or _get_llm(temperature=temperature, simple=simple)
-    if isinstance(llm, ChatNVIDIA):
-        parsed = llm.with_structured_output(schema).invoke(messages)
-        return {"parsed": parsed, "raw": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0}}
-    result = llm.with_structured_output(schema, include_raw=True).invoke(messages)
-    raw = result.get("raw")
-    usage = (getattr(raw, "usage_metadata", None)
-             or (getattr(raw, "response_metadata", {}) or {}).get("token_usage")
-             or {})
-    return {"parsed": result.get("parsed"), "raw": raw, "usage": usage}
+    raw = None
+    try:
+        result = llm.with_structured_output(schema, include_raw=True).invoke(messages)
+        if isinstance(result, dict) and "parsed" in result:
+            parsed, raw = result.get("parsed"), result.get("raw")
+        else:
+            parsed = result
+    except NotImplementedError:
+        parsed = llm.with_structured_output(schema, include_raw=False).invoke(messages)
+    usage = {}
+    if raw is not None:
+        usage = (getattr(raw, "usage_metadata", None)
+                 or (getattr(raw, "response_metadata", {}) or {}).get("token_usage")
+                 or {})
+    return {"parsed": parsed, "raw": raw, "usage": usage}
