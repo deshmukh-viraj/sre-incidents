@@ -3,9 +3,9 @@ agents/execution_agent.py
 --------------------------
 execution agents: human approval gate and action executor.
 
-    human_gate_node— node 6: pauses workflow; waits for /approve call in production.
+    human_gate_node: node 6: pauses workflow; waits for /approve call in production.
                        in simulation mode (SIM_AUTO_APPROVE=true) auto-approves after timeout.
-    execute_node— node 7: runs each action in the plan, appends incident to KG.
+    execute_node:    node 7: runs each action in the plan, appends incident to KG.
 
 writes to state:
     human_approved, approval_timeout (human_gate)
@@ -40,7 +40,7 @@ except ImportError:
 
 
 def _recovery_checker_enabled() -> bool:
-    """B2 RecoveryChecker flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    """Recovery checker flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("RECOVERY_CHECKER_ENABLED", "0") == "1"
 
@@ -48,14 +48,14 @@ def _recovery_checker_enabled() -> bool:
 def log_stage(incident_id: str, stage: str, detail: str = ""):
     """clean stage logger for real-time terminal visibility.
     flush=True: block-buffered stdout once froze a live run at poll 6/14 for
-    102 min (INC-OTelUs-C830 postmortem) — stage lines are the heartbeat and
+    102 min (INC-OTelUs-C830 postmortem): stage lines are the heartbeat and
     must never sit in the buffer."""
     suffix = f" | {detail}" if detail else ""
     print(f"\n[{incident_id}] ▶ {stage}{suffix}", flush=True)
 
 
 def _executor_receipts_enabled() -> bool:
-    """B6 typed ExecutionReceipts flag (default 0; MULTI_AGENT=1 enables all)."""
+    """Typed execution receipts flag (default 0; MULTI_AGENT=1 enables all)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("EXECUTOR_RECEIPTS_ENABLED", "0") == "1"
 
@@ -67,8 +67,8 @@ def human_gate_node(state: AgentState) -> dict:
     check if action requires human approval
     if yes, pauses the graph (interrupt). if no, passes through
 
-    B7 (flag HANDOFF_ENABLED, default 0): an un-presented handoff_to_human
-    package (budget/loop exhaustion) is transferred HERE — the single
+    Handoff (flag HANDOFF_ENABLED, default 0): an un-presented handoff_to_human
+    package (budget/loop exhaustion) is transferred HERE, the single
     handoff-to-human write path: interrupt carries reason + options; the
     decision maps to the unchanged approval semantics (approve -> execute,
     reject -> escalate).
@@ -83,7 +83,7 @@ def human_gate_node(state: AgentState) -> dict:
         print(f"[human_gate] Presenting handoff package for {incident_id} "
               f"(cause={pkg.get('cause')})")
         decision = interrupt({
-            "question": "Agent budget/loop exhausted — choose how to proceed",
+            "question": "Agent budget/loop exhausted: choose how to proceed",
             "incident_id": incident_id,
             "reason": pkg.get("reason"),
             "options": pkg.get("options", []),
@@ -124,14 +124,14 @@ def human_gate_node(state: AgentState) -> dict:
                 fresh = collect_incident_signals(svc)
                 breaches += _breaches({**state, "raw_signals": fresh})
             if not breaches:
-                print(f"[human_gate] NATURAL CALM for {incident_id}: live signals healthy "
-                      f"— closing without human page")
+                print(f"[human_gate] NATURAL CALM for {incident_id}: live signals healthy, "
+                      f"closing without human page")
                 return {
                     "human_approved": False,
                     "natural_calm": True,
                     "resolution_status": ResolutionStatus.RESOLVED.value,
                     "resolution_cause": "natural_calm",
-                    "resolution_notes": "alert calmed before approval — live signals healthy, no action taken",
+                    "resolution_notes": "alert calmed before approval (live signals healthy, no action taken)",
                     "message_ledger": [{
                         "timestamp": datetime.datetime.utcnow().isoformat(),
                         "from_worker": "human_gate", "kind": "note",
@@ -139,7 +139,7 @@ def human_gate_node(state: AgentState) -> dict:
                     }],
                 }
             if time.time() >= deadline:
-                print(f"[human_gate] still breaching after {soak}s soak — paging human ({breaches[0]})")
+                print(f"[human_gate] still breaching after {soak}s soak, paging human ({breaches[0]})")
                 break
             time.sleep(min(20, max(1, deadline - time.time())))
 
@@ -151,7 +151,7 @@ def human_gate_node(state: AgentState) -> dict:
         if a.get("requires_approval"):
             actions_text += f" {a['action']}\n"
 
-    # P7: page AFTER the decision arrives — the node re-runs from the top on
+    # Page after the decision arrives: the node re-runs from the top on
     # Command(resume=...), so a pre-interrupt page would fire twice (the
     # interrupted run's partials are discarded). One page, with the decision.
     human_decsion = interrupt({
@@ -180,7 +180,7 @@ def human_gate_node(state: AgentState) -> dict:
         "approval_timeout": False,
         "approval_notified": True,
     }
-    # approval binding (gap 4): the API verifies the decision against the paused
+    # Approval binding: the API verifies the decision against the paused
     # plan's keys; only bound keys survive into execution, the rest are recorded
     approved_keys = human_decsion.get("approved_action_keys")
     if human_decsion.get("approved") and approved_keys is not None:
@@ -322,7 +322,7 @@ def _verify_recovery(
         log_stage(alert_name, "POLL_WAIT", f"{wait_reason} {interval}s...")
         time.sleep(interval)
 
-    log_stage(alert_name, "VERIFICATION_EXHAUSTED", f"exhausted {polls} polls — no recovery")
+    log_stage(alert_name, "VERIFICATION_EXHAUSTED", f"exhausted {polls} polls, no recovery")
     return VerificationResult(
         verified=False,
         p99_latency_s=curr_p99,
@@ -336,7 +336,7 @@ def _signal_expr(service: str, signal: Optional[str]) -> tuple[str, float, str]:
     maps the verification signal (which metric actually recovered) to the metric
     expression, threshold, comparison that gate3's range query needs to ask the
     same question against real history. expressions come from the metrics adapter
-    template registry — no dialect is authored in this node.
+    template registry; no dialect is authored in this node.
     """
     from src.tools.backends.registry import get_backend
 
@@ -373,7 +373,7 @@ def execute_node(state: AgentState) -> dict:
 
     all_success = True
     updated_plan = []
-    receipts: List[Dict[str, Any]] = []  # B6: typed ExecutionReceipt dicts
+    receipts: List[Dict[str, Any]] = []  # Typed execution receipt dicts
 
     executed_keys = list(state.get("executed_action_keys", []))
     
@@ -381,7 +381,20 @@ def execute_node(state: AgentState) -> dict:
     execution_evidence: List[Dict[str, Any]] = []
 
     # extract service name from state for post-remediation metric checks
-    affected_services = (state.get("affected_services") or ["payment_gateway"])
+    affected_services = state.get("affected_services") or []
+    if not affected_services:
+        log_stage(
+            incident_id,
+            "EXECUTION_BLOCKED",
+            "No identified target service. Refusing service-specific remediation"
+        )
+        return {
+            "resolution_status": ResolutionStatus.ESCALATED.value,
+            "resolution_notes": ("Remediation blocked: the affected service could not be identified"),
+            "verified": False,
+            "execution_evidence": [],
+            "action_taken": "",
+        }
     service = affected_services[0]
 
     # snapshot pre-remediation metrics so we can compare after  
@@ -390,7 +403,7 @@ def execute_node(state: AgentState) -> dict:
     
     is_shadow = bool(state.get("shadow_execution"))
     if is_shadow:
-        log_stage(incident_id, "EXECUTION", "SHADOW mode — suppressing execution")
+        log_stage(incident_id, "EXECUTION", "SHADOW mode: suppressing execution")
 
     # remote (AWS OTel demo) remediation: the alert labels authorize the exact
     # remote flag remediation is authorized by the AGENT's proposal: the plan's
@@ -455,7 +468,7 @@ def execute_node(state: AgentState) -> dict:
         if result.get("success"):
             executed_keys.append(key)
 
-        # B6: typed receipt from the result we ALREADY have — no new network
+        # Typed receipt from the result we already have (no new network
         # calls; the seam where the sandbox executor plugs in later.
         if _executor_receipts_enabled():
             try:
@@ -495,7 +508,7 @@ def execute_node(state: AgentState) -> dict:
     if remote_flip:
         # short propagation grace (flagd file-watch + demo reload); the 5m
         # alert-window dilution is absorbed by the verification POLLS below,
-        # not by sleeping — sleeping here inflates the gate-3 lead to the
+        # not by sleeping: sleeping here inflates the gate-3 lead to the
         # sleep duration itself (t_clear lands on the first post-grace poll)
         grace_period = max(grace_period, REMOTE_FLAG_PROPAGATION_SECONDS)
 
@@ -535,7 +548,7 @@ def execute_node(state: AgentState) -> dict:
             business_mttr = int((verified_at - start_ts).total_seconds())
             verification_evidence = asdict(result)
 
-    # B2 RecoveryChecker: deterministic ADDITIONAL signal, emitted after the
+    # Recovery checker: deterministic additional signal, emitted after the
     # poll; verdicts unchanged this phase (checker_result is informational).
     checker_result = None
     if _recovery_checker_enabled():
@@ -557,7 +570,7 @@ def execute_node(state: AgentState) -> dict:
         print(f"[execute] Done: Business MTTR={business_mttr}s Agent MTTR={agent_mttr}s success=True  verified=True")
     elif all_success:
         status = ResolutionStatus.EXECUTED_UNVERIFIED.value
-        print(f"[execute] Done: Agent MTTR={agent_mttr}s  success=True  verified=False — metric did not improve")
+        print(f"[execute] Done: Agent MTTR={agent_mttr}s  success=True  verified=False (metric did not improve)")
     else:
         status = ResolutionStatus.FAILED.value
         print(f"[execute] Done: Agent MTTR={agent_mttr}s  success=False")
@@ -568,7 +581,7 @@ def execute_node(state: AgentState) -> dict:
     tolerance = DELTA_EFFECT_SECONDS.get(tool_name, 30) + VERIFICATION_OVERHEAD_SECONDS
     if remote_flip:
         # the demo's alert needs the trailing 5m window to dilute after a real
-        # fix (~2-4 min) plus the AM group wait — give gate-3 the full budget
+        # fix (~2-4 min) plus the AM group wait, so give gate-3 the full budget
         tolerance = max(REMOTE_FLAG_EFFECT_SECONDS + VERIFICATION_OVERHEAD_SECONDS, tolerance)
     signal = verification_evidence.get('signal') if verification_evidence else None
     expr, threshold, comparison = _signal_expr(service, signal)
@@ -638,7 +651,7 @@ def execute_node(state: AgentState) -> dict:
         "resolution_status": status,
         "verified": verified,
         "action_executed_at": action_executed_at_iso,
-        # D-02 re-attack budget: a failed execution is one unit of new evidence;
+        # Re-attack budget: a failed execution is one unit of new evidence;
         # the second failure escalates instead of looping
         "reattacks": 0 if verified else 1,
         "reattack_hint": None if verified else (
