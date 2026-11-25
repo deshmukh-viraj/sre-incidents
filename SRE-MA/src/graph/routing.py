@@ -481,6 +481,9 @@ def route_after_verification(
       unspent -> one more investigation pass carrying the post-action evidence
     - re-attack already spent, or the plan never executed -> escalate (human)
     """
+    if not state.get("affected_services"):
+        return "escalate_execution"
+        
     if state.get("verified"):
         return "end_resolved"
     if state.get("action_executed_at") and int(state.get("reattacks", 0) or 0) < 1:
@@ -591,14 +594,25 @@ _DEFAULT_SERVICE_ALIASES = {
 }
 
 
-def infer_service(alert_name: str) -> str:
-    #the fintech pack's service_aliases override the coded map
+
+def infer_service(alert_name: str) -> str | None:
+    """
+    Infer a service only when an explicit configured alias matches.
+    """
+    if not alert_name:
+        return None
+
     try:
         from src.config.loader import config_pack
-        mapping = (config_pack().get("service_aliases") or _DEFAULT_SERVICE_ALIASES)
+        pack = config_pack() or {}
+        mapping = pack.get("service_aliases") or _DEFAULT_SERVICE_ALIASES
     except Exception:
         mapping = _DEFAULT_SERVICE_ALIASES
-    for keyword, svc in mapping.items():
-        if keyword.lower() in alert_name.lower():
-            return svc
-    return "payment_gateway"
+
+    alert_lower = alert_name.lower()
+
+    for keyword, service in mapping.items():
+        if keyword.lower() in alert_lower:
+            return service
+
+    return None
