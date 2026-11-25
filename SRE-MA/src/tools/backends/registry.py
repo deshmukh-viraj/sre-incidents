@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 from src.tools.backends.base import BackendConfig, LogsBackend, MetricsBackend, TracesBackend
+from src.tools.backends.opensearch import OpenSearchBackend
 
 _ADAPTERS = {}  
 
@@ -29,7 +30,7 @@ def _load_pack(pack_name: str) -> Dict:
 
 
 def active_environment() -> str:
-    return os.getenv("SRE_ENVIRONMENT", "fintech_sim")
+    return os.getenv("SRE_ENVIRONMENT", "sandbox")
 
 
 def _adapter_class(kind: str, adapter_name: str):
@@ -41,6 +42,7 @@ def _adapter_class(kind: str, adapter_name: str):
         _ADAPTERS.update({
             ("metrics", "prometheus"): PrometheusBackend,
             ("logs", "loki"): LokiBackend,
+            ("logs", "opensearch"): OpenSearchBackend,
             ("traces", "tempo"): TempoBackend,
             ("traces", "jaeger"): JaegerBackend,
         })
@@ -70,7 +72,7 @@ def get_backend(kind: str) -> Optional[Any]:
         timeout_s=float(section.get("timeout_s", 10.0)),
         max_rows=int(section.get("max_rows", 100)),
         enabled=True,
-     
+        index_pattern=section.get("index_pattern", "otel-logs-*"),
         label_style=section.get("label_style") or pack.get("label_style", "fintech"),
     )
     backend = _adapter_class(kind, cfg.adapter)(cfg)
