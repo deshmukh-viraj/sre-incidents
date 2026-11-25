@@ -39,7 +39,13 @@ from src.graph.routing import ALERT_CORRELATION_WINDOW, DEFAULT_CORRELATION_WIND
 from src.graph.timeutils import parse_ts
 from src.utils.logger import inc_id
 
-# gap 4 control-plane guards (see docs/TARGET_ARCHITECTURE.md section 6)
+# an escalated incident folds repeat alerts for this long before a new run is
+# allowed. without it every alertmanager repeat (~5-6m) spawned a fresh
+# investigation that escalated again. ponytail: flat 30m cap; raise it if a
+# fault class routinely needs a fresh attempt sooner.
+ESCALATED_CORRELATION_WINDOW = 1800
+
+# Control-plane guards (see docs/TARGET_ARCHITECTURE.md section 6)
 from collections import deque
 _WEBHOOK_TIMES: deque = deque()
 _ANSWER_PATTERN = __import__("re").compile(
@@ -233,10 +239,10 @@ def _run_agent(incident_id: str, raw_signals: dict, config: Optional[dict] = Non
 
         status = result.get('resolution_status')
         if status == ResolutionStatus.WAITING_FOR_APPROVAL.value:
-            print(f"[agent] Graph paused for {incident_id} — awaiting human approval")
+            print(f"[agent] Graph paused for {incident_id}, awaiting human approval")
         else:
             _record_attribution(result, raw_signals.get('severity', 'unknown'))
-            # Bet 5/D-06: every terminal incident is a learning candidate; the
+            # Every terminal incident is a learning candidate; the
             # deterministic draft lands in the human-gated queue, never auto-applied
             try:
                 from src.learning.distill import enqueue
@@ -256,7 +262,7 @@ def _run_agent(incident_id: str, raw_signals: dict, config: Optional[dict] = Non
             if tokens:
                 token_counter.inc(tokens)
 
-            print(f"[agent] Graph completed for {incident_id} —> status={status}")
+            print(f"[agent] Graph completed for {incident_id} -> status={status}")
 
     except Exception as e:
         print(f"[agent]  AGENT CRASHED for {incident_id} ")
@@ -341,7 +347,6 @@ def _resume_agent(incident_id: str, config: dict, resume_payload: Optional[dict]
 
         from src.graph.orchestrator import app as sre_graph
         from langgraph.types import Command
-        # P7: interrupt() + Command(resume=...) — the decision reaches the
         # paused human_gate node directly (replaces update_state + invoke(None))
         resume_input = Command(resume=resume_payload) if resume_payload is not None else None
         result = sre_graph.invoke(resume_input, config=resume_config)
@@ -374,8 +379,8 @@ def _resume_agent(incident_id: str, config: dict, resume_payload: Optional[dict]
             _incidents.get(incident_id, {}).get('severity') or 'unknown',
         )
 
-        print(f"[agent] Graph completed for {incident_id} — status={result.get('resolution_status')}")
-        # the paused run computed the Langfuse UI url once — republish it on resume
+        print(f"[agent] Graph completed for {incident_id}, status={result.get('resolution_status')}")
+        # the paused run computed the Langfuse UI url once, so republish it on resume
         trace_url = _incidents.get(incident_id, {}).get("trace_url")
         if trace_url:
             print(f"[langfuse] View trace in browser: {trace_url}")
@@ -439,6 +444,14 @@ def find_correlated_incident(service: str, alert_name: str) -> Optional[str]:
             continue
         
         status = i.get("status")
+        if status == ResolutionStatus.ESCALATED.value:
+            # fold repeats into an escalated incident instead of spawning a new
+            # run every alertmanager interval; after the cooldown, one new
+            # attempt is allowed
+            escalated_at = i.get("resolved_at") or i.get("agent_invoked_at")
+            if escalated_at and (_utcnow() - parse_ts(escalated_at)).total_seconds() < ESCALATED_CORRELATION_WINDOW:
+                return incident_id
+            continue
         if status not in (ResolutionStatus.FAILED.value, ResolutionStatus.ESCALATED.value):
             if status == ResolutionStatus.RESOLVED.value:
                 verified_at = i.get("verified_at")
@@ -499,7 +512,7 @@ async def alertmanager_webhook(
     catch webhooks from alertmanager.
     dedupes using langgraph thread_id so we don't spam.
     """
-    # gap 4: a webhook flood is a cost attack (every alert spawns LLM work).
+    # A webhook flood is a cost attack (every alert spawns LLM work).
     # sliding 60s window, per-process (single-service deployment by design).
     now_s = _utcnow().timestamp()
     while _WEBHOOK_TIMES and now_s - _WEBHOOK_TIMES[0] > 60:
@@ -544,11 +557,12 @@ async def alertmanager_webhook(
         from src.tools.kg_tool import query_recent_resolved_incident, revoke_credit,get_dependencies
         import datetime as dt 
 
-        deps = get_dependencies(service)
+        deps = get_dependencies(service) if service else []
         parent_incident = None 
         if deps:
             for iid, inc in _incidents.items():
                 inc_service = inc.get("raw_signals", {}).get("service")
+
                 if inc_service in deps and inc.get("status") not in (
                     ResolutionStatus.RESOLVED.value, ResolutionStatus.FAILED.value, ResolutionStatus.ESCALATED.value
                 ):
@@ -575,7 +589,7 @@ async def alertmanager_webhook(
                 
             
         pending_revoke_id = None
-        recent = query_recent_resolved_incident(alert_name, service)
+        recent = query_recent_resolved_incident(alert_name, service) if service else None
         if recent:
             verified_at = recent.get("verified_at")
             if verified_at:
@@ -593,7 +607,7 @@ async def alertmanager_webhook(
 
         #debounce per (service, alertname)
         # service for 5 mins
-        alert_key = (service, alert_name)
+        alert_key = (service or "unknown-service", alert_name)
         
         # correlation gate: check both active and recently resolved incident
         # using a winodw sized
@@ -636,7 +650,7 @@ async def alertmanager_webhook(
             "runbook": labels.get('runbook'),
             "team": labels.get("team"),
             "severity": labels.get("severity"),
-            "service": labels.get("service"),
+            "service": service,
             "alert_started_at": alert.startsAt,
             "summary": annots.get("summary"),
             "description": annots.get("description")
@@ -693,7 +707,7 @@ async def get_incident(incident_id: str):
 
 @app.post("/incidents/{incident_id}/approve")
 async def approve_incident(incident_id: str, background_tasks: BackgroundTasks, req: ApprovalRequest, request: Request = None):
-    # gap 4: the approval endpoint is the crown jewel. Authn when APPROVAL_TOKEN
+    # The approval endpoint is the crown jewel. Authn when APPROVAL_TOKEN
     # is set (sim regimes may leave it unset; startup logs a warning).
     _APPROVAL_TOKEN = os.getenv("APPROVAL_TOKEN", "")
     if _APPROVAL_TOKEN:
@@ -811,7 +825,7 @@ async def approve_incident(incident_id: str, background_tasks: BackgroundTasks, 
 
 @app.get("/learning/drafts")
 def list_learning_drafts():
-    """pending learning drafts (Bet 5): human-gated memory writes."""
+    """Pending learning drafts: human-gated memory writes."""
     from src.learning.distill import pending_drafts
     return pending_drafts()
 
