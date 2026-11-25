@@ -3,8 +3,8 @@ agents/diagnoser_agent.py
 --------------------------
 diagnoser agent: two nodes in the LangGraph pipeline.
 
-    diagnoser_node  — deterministic pattern matching, no LLM
-    llm_diagnoser   — LLM + FAISS runbooks + Neo4j KG fallback
+    diagnoser_node: deterministic pattern matching, no LLM
+    llm_diagnoser:  LLM + FAISS runbooks + Neo4j KG fallback
 
 responsibility:
     - try deterministic diagnosis first (fast, free, no API calls)
@@ -36,13 +36,12 @@ load_dotenv()
 
 
 def _typed_diagnosis_enabled() -> bool:
-    """B4 flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
+    """Typed diagnosis flag (default 0; MULTI_AGENT=1 enables all upgrades)."""
     return os.getenv("MULTI_AGENT", "0") == "1" or \
         os.getenv("TYPED_DIAGNOSIS_ENABLED", "0") == "1"
 
 
 # node 1: deterministic diagnoser
-
 def diagnoser_node(state: AgentState) -> dict:
     """
     try hardcoded checks first using just numbers.
@@ -93,8 +92,8 @@ def diagnoser_node(state: AgentState) -> dict:
             "supporting_runbook": result.get("supporting_runbook")
         }
         
-        affected_service = state.get("affected_services", ["unknown"])[0]
-        
+        affected_services = state.get("affected_services") or []
+        affected_service = affected_services[0] if affected_services else "unknown"
 
         return {
             "hypotheses": [hypothesis],
@@ -139,7 +138,7 @@ def diagnoser_node(state: AgentState) -> dict:
         }
 
 
-    print("[diagnoser] no deterministic pattern & no KG memory — routing to deep investigation")
+    print("[diagnoser] no deterministic pattern & no KG memory, routing to deep investigation")
     return {
         "hypotheses": [],
         "diagnosis_mode": "pending_llm",  # 'deterministic' here caused router to waste all retry loops on broken LLM
@@ -175,8 +174,8 @@ def llm_diagnoser(state: AgentState) -> dict:
     # context: Neo4j KG
     kg_context = query_knowledge_graph(affected_services=services, alert_name=alert)
 
-    # signal summary (exclude log summaries / patterns; exclude dunder keys —
-    # R7 ground-truth isolation: sim identity keys must never reach a prompt)
+    # signal summary (exclude log summaries / patterns; exclude dunder keys
+    # ground-truth isolation: sim identity keys must never reach a prompt)
     signals_str = (
         "\n".join(
             f"  {k}: {v}"
@@ -200,8 +199,8 @@ You will be given:
 Your job is to identify the most likely root cause and return structured JSON.
 
 Rules:
-- Your confidence score must be honest — 0.70+ only if evidence is strong
-- Be specific — name the exact service and failure mode
+- Your confidence score must be honest (0.70+ only if evidence is strong)
+- Be specific: name the exact service and failure mode
 - diagnosis_summary must connect the signals to the root cause clearly
 - blast_analysis must name specific downstream services
 - Never invent signals or actions not present in the data
@@ -220,7 +219,7 @@ Schema:
         "supporting_runbook": "RB-00X or null"
     }}
     ],
-    "root_cause": "most likely hypothesis — one clear sentence",
+    "root_cause": "most likely hypothesis in one clear sentence",
     "diagnosis_summary": "2-4 sentences explaining what is happening, why, and how signals connect. Write for an on-call engineer who just woke up.",
     "evidence_summary": "bullet list of the key signals that led to this diagnosis",
     "blast_analysis": "what breaks next if this is not fixed in the next 10 minutes",
@@ -247,15 +246,17 @@ Diagnose this incident. Return JSON ONLY.
 """
 
     try:
-        result = llm.with_structured_output(DiagnoserOutput, include_raw=True).invoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)])
-        resp, raw_msg = result["parsed"], result["raw"]
+        sr = structured_invoke(
+            DiagnoserOutput,
+            [SystemMessage(content=system_prompt), HumanMessage(content=human_prompt)],
+            llm=llm)
+        resp = sr["parsed"]
 
         hypotheses = [h.model_dump() for h in resp.hypotheses]
         if _typed_diagnosis_enabled():
-            # B4: emit typed HypothesisReport per hypothesis (R3 structured+
-            # fallback); a hypothesis that fails typed validation keeps its raw
-            # dict — the fast path and routing math are untouched.
+            # Emit a typed HypothesisReport per hypothesis (structured output
+            # with a fallback). A hypothesis that fails typed validation keeps
+            # its raw dict so the fast path and routing math stay untouched.
             typed = []
             for h in resp.hypotheses:
                 try:
@@ -273,7 +274,7 @@ Diagnose this incident. Return JSON ONLY.
         blast_analysis = resp.blast_analysis
 
         # token tracking using usage_metadata from response
-        usage = raw_msg.usage_metadata or raw_msg.response_metadata.get("token_usage", {})
+        usage = sr["usage"] or {}
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
         cost = calculate_cost(input_tokens, output_tokens)
