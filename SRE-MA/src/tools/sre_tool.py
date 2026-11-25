@@ -29,7 +29,7 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 JIRA_URL = os.getenv("JIRA_URL")
 JIRA_TOKEN = os.getenv("JIRA_TOKEN")
 JIRA_PROJECT = os.getenv("JIRA_PROJECT", "INC")
-LOOKBACK_MIN = int(os.getenv("LOOKBACK_MIN", "15"))
+LOG_LOOKBACK_MIN = int(os.getenv("LOOKBACK_MIN", "15"))
 
 
 def _post_json(url: str, data: dict, timeout: float = 30.0, headers: Optional[dict] = None) -> dict:
@@ -47,10 +47,12 @@ def _post_json(url: str, data: dict, timeout: float = 30.0, headers: Optional[di
         return json.loads(content) if content else {}
 
 
-def collect_all_signals(service: str) -> Dict[str, Any]:
+def collect_all_signals(service: str, lookback_minutes: Optional[int]=None) -> Dict[str, Any]:
     """Collects metrics and log patterns for a service across configured backends."""
     signals = collect_incident_signals(service)
     signals["metrics_ok"] = signals.get("p99_latency_s") is not None
+
+    lookback = max(1, int(lookback_minutes if lookback_minutes is not None else LOG_LOOKBACK_MIN),)
 
     def _empty_logs(err: Optional[str] = None) -> Dict[str, Any]:
         return {
@@ -72,9 +74,9 @@ def collect_all_signals(service: str) -> Dict[str, Any]:
         return signals
 
     try:
-        errs = logs.log_capability("service_errors", service=service, limit=20, lookback_minutes=LOOKBACK_MIN)
-        sec = logs.log_capability("audit_events", service=service, lookback_minutes=LOOKBACK_MIN)
-        slow = logs.log_capability("slow_queries", service=service, limit=30, lookback_minutes=LOOKBACK_MIN)
+        errs = logs.log_capability("service_errors", service=service, limit=20, lookback_minutes=lookback)
+        sec = logs.log_capability("audit_events", service=service, lookback_minutes=lookback)
+        slow = logs.log_capability("slow_queries", service=service, limit=30, lookback_minutes=lookback)
         all_logs = errs + sec + slow
 
         signals.update({
